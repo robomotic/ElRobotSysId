@@ -14,6 +14,18 @@ on M6 cause a 1 Hz limit cycle.
 - No analysis or fitting scripts yet. Next: a Python fitter (per joint: dead time + first-order lag + kp/damping/frictionloss,
   then a check against the chirp), then the MuJoCo actuator parameters.
 
+## Requirement: safety area (table) before any further run (user, 2026-11-20)
+The arm sits on a table and **must never hit it**. The per-joint excursion cap (`--max-amp`) is not enough: a shoulder or
+elbow move of a few degrees swings the paddle or gripper a long way. Before sysid runs on the arm (and on M1–M4 in
+particular), add a workspace safety check (GitHub issue #1):
+- full forward kinematics with positions (URDF joint origins, not only the axes) for the gripper, the paddle rim and the
+  elbow/wrist links;
+- a configurable keep-out region: table plane height plus margin (and optionally a box around the base or other obstacles);
+- **before moving:** check the base pose and every extreme of the planned signal for each joint; refuse joints/amplitudes
+  that would enter the keep-out region, and say by how much;
+- **while running:** stop and return to base if the measured pose comes within the margin;
+- the table height must be measured or taught (e.g. jog the gripper down to just above the table and record it), not guessed.
+
 ## Hardware and access
 - Pi "NormaStation" (Pi 4, Debian 13): `ssh robomotic@normastation.local`. If mDNS fails (Wi-Fi drops), use the LAN IP
   (192.168.68.56 on 2026-11-19; may change). Passwordless sudo works.
