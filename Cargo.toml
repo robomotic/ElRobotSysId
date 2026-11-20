@@ -1,0 +1,24 @@
+[package]
+name = "elrobot-sysid"
+version = "0.1.0"
+edition = "2021"
+description = "Per-joint ST3215 servo system identification for the ElRobot follower (MuJoCo sim2real2sim)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "elrobot-sysid"
+path = "src/main.rs"
+
+[dependencies]
+# ST3215 packet codec and register map, from NormaCore (pinned; needs `protoc` at build time).
+st3215 = { git = "https://github.com/norma-core/norma-core", rev = "6b494f77fac366a878ae71222458b196f8400dee" }
+tokio = { version = "1.49", features = ["full"] }
+tokio-serial = "5.4.5"
+bytes = "1.11"
+log = "0.4.28"
+env_logger = "0.11"
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
