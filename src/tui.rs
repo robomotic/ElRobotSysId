@@ -4,7 +4,7 @@
 use crate::bus::Bus;
 use crate::io::SimIo;
 use crate::safety::{self, SafetyConfig};
-use crate::session::{self, Base, Event, JointSummary, SessionOpts, Test};
+use crate::session::{self, ctl, Base, Event, JointSummary, SessionOpts, Test};
 use crate::settings::Settings;
 use anyhow::Result;
 use crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -16,7 +16,7 @@ use ratatui::widgets::{Axis, Block, Cell, Chart, Clear, Dataset, Gauge, GraphTyp
 use ratatui::Frame;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
@@ -31,16 +31,17 @@ const TESTS: [(Test, &str, &str); 5] = [
 ];
 const AMPS: [u16; 6] = [25, 50, 75, 100, 150, 200];
 const ACCS: [u8; 5] = [0, 50, 100, 150, 254];
-const PAYLOADS: [&str; 3] = ["paddle", "none", "paddle+ball"];
+const PAYLOADS: [&str; 3] = ["none", "paddle", "paddle+ball"];
 const ARM_TIMEOUT: Duration = Duration::from_secs(30);
-const HELP: [&str; 14] = [
+const HELP: [&str; 15] = [
     "↑ ↓        move between joints, tests and settings",
     "Space      tick / untick the joint or test",
     "← →        change the setting (amplitude, acceleration, base pose, payload)",
     "Enter      start (real arm: needs ARMED and a measured table height; asks first)",
     "a          ARM / disarm the real arm (switches itself off after 30 s without a key)",
-    "Esc        while running: stop (the joint returns to base) · otherwise quit",
-    "Ctrl-C     emergency stop from anywhere",
+    "Space      while running: SAFETY STOP, freezes the arm where it is (then r = return, q = leave)",
+    "Esc        while running: stop gently, the joint returns to base · otherwise quit",
+    "Ctrl-C     emergency: freeze where it is, leave it there, quit",
     "",
     "Joints are tested one at a time; all others hold. M8 (gripper) is never moved.",
     "Safety: every joint's whole sweep must stay ≥ margin above the table, or it can't start.",
@@ -53,7 +54,7 @@ const HELP: [&str; 14] = [
 enum Mode {
     Setup,
     Confirm,
-    Running { rx: UnboundedReceiver<Event>, stop: Arc<AtomicBool>, started: Instant },
+    Running { rx: UnboundedReceiver<Event>, stop: Arc<AtomicU8>, started: Instant, frozen: Option<u8> },
     Done,
 }
 
@@ -189,7 +190,7 @@ impl App {
     fn start(&mut self) {
         let o = self.current_opts();
         let (tx, rx) = unbounded_channel();
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicU8::new(ctl::RUN));
         let (sc, sim, cfg, stop2) = (self.sc.clone(), self.sim, self.cfg.clone(), stop.clone());
         tokio::spawn(async move {
             let etx = tx.clone();
@@ -216,7 +217,7 @@ impl App {
         self.result = None;
         self.joint = None;
         self.armed_until = None;
-        self.mode = Mode::Running { rx, stop, started: Instant::now() };
+        self.mode = Mode::Running { rx, stop, started: Instant::now(), frozen: None };
         self.msg(if self.sim { "simulated servos: nothing moves" } else { "checking the servos and the safety area..." });
     }
 
@@ -251,6 +252,12 @@ impl App {
                         self.rate.pop_front();
                     }
                 }
+                Event::Frozen { id } => {
+                    if let Mode::Running { frozen, .. } = &mut self.mode {
+                        *frozen = Some(id);
+                    }
+                    self.msg(format!("SAFETY STOP: M{id} frozen in place. r = return slowly to base, q = leave it here"));
+                }
                 Event::JointDone(js) => {
                     self.msg(format!("M{} done{}", js.id, js.stopped.as_ref().map_or(String::new(), |r| format!(": stopped, {r}"))));
                     self.summaries.push(js);
@@ -271,11 +278,21 @@ impl App {
             self.armed_until = Some(Instant::now() + ARM_TIMEOUT);
         }
         if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
+            // Emergency: freeze where it is, leave it there, quit.
             if let Mode::Running { stop, .. } = &self.mode {
-                stop.store(true, Ordering::Relaxed);
+                stop.store(ctl::LEAVE, Ordering::Relaxed);
             }
             self.quit = true;
             return;
+        }
+        // SAFETY STOP has priority over everything (also over the help overlay).
+        if let Mode::Running { stop, frozen, .. } = &self.mode {
+            if k.code == KeyCode::Char(' ') && frozen.is_none() && stop.load(Ordering::Relaxed) == ctl::RUN {
+                stop.store(ctl::FREEZE, Ordering::Relaxed);
+                self.help = false;
+                self.msg("SAFETY STOP pressed: freezing the arm where it is");
+                return;
+            }
         }
         if self.help {
             self.help = false;
@@ -286,10 +303,22 @@ impl App {
             return;
         }
         match &self.mode {
-            Mode::Running { stop, .. } => {
-                if matches!(k.code, KeyCode::Esc | KeyCode::Char('q')) {
-                    stop.store(true, Ordering::Relaxed);
-                    self.msg("stopping: the joint returns to its base position");
+            Mode::Running { stop, frozen, .. } => {
+                let frozen = frozen.is_some() || stop.load(Ordering::Relaxed) == ctl::FREEZE;
+                match (frozen, k.code) {
+                    (true, KeyCode::Char('r')) => {
+                        stop.store(ctl::RETURN, Ordering::Relaxed);
+                        self.msg("returning slowly to base");
+                    }
+                    (true, KeyCode::Char('q')) => {
+                        stop.store(ctl::LEAVE, Ordering::Relaxed);
+                        self.msg("leaving the arm where it is");
+                    }
+                    (false, KeyCode::Esc | KeyCode::Char('q')) => {
+                        stop.store(ctl::RETURN, Ordering::Relaxed);
+                        self.msg("stopping: the joint returns to its base position");
+                    }
+                    _ => {}
                 }
             }
             Mode::Confirm => {
@@ -360,7 +389,8 @@ impl App {
                 ("SYSTEM ID", k)
             }
             Mode::Confirm => ("SYSTEM ID", vec![("y", "start"), ("any key", "cancel")]),
-            Mode::Running { .. } => ("RUNNING", vec![("Esc", "stop (joint returns to base)"), ("?", "help")]),
+            Mode::Running { frozen: Some(_), .. } => ("FROZEN", vec![("r", "return slowly to base"), ("q", "leave it here")]),
+            Mode::Running { .. } => ("RUNNING", vec![("Space", "SAFETY STOP (freeze)"), ("Esc", "stop & return to base"), ("?", "help")]),
             Mode::Done => ("RESULTS", vec![("Enter", "new run"), ("q", "quit"), ("?", "help")]),
         };
         let mut hs = vec![Span::styled(format!(" {title} "), Style::new().fg(Color::Black).bg(Color::Cyan).bold()), Span::raw("  ")];
@@ -425,8 +455,9 @@ impl App {
         let reach = session::plan_reach(&segs);
         let per_joint: f64 = segs.iter().map(|s| s.dur).sum::<f64>() + 2.0;
         let base = o.level7();
+        let sc = o.safety(&self.sc);
         let safety_rows: Vec<Option<session::JointClearance>> = (1..=7u8)
-            .map(|id| base.map(|b| session::clearance_rows(&self.sc, &b, &[id], reach).remove(0)))
+            .map(|id| base.map(|b| session::clearance_rows(&sc, &b, &[id], reach).remove(0)))
             .collect();
         let [left, right] = Layout::horizontal([Constraint::Min(62), Constraint::Length(48)]).areas(area);
         let sel = |i: usize| i == self.cursor;
@@ -468,7 +499,7 @@ impl App {
             ("amplitude", format!("{} ticks ({:.1}°)", AMPS[self.amp_i], AMPS[self.amp_i] as f64 * 360.0 / 4096.0)),
             ("acceleration", if ACCS[self.acc_i] == 0 { "servo max (0)".into() } else { ACCS[self.acc_i].to_string() }),
             ("base pose", if o.base == Base::Level { "level (from paddle.toml)".into() } else { "current (where the arm is)".into() }),
-            ("payload", PAYLOADS[self.payload_i].to_string()),
+            ("payload", format!("{}{}", PAYLOADS[self.payload_i], if PAYLOADS[self.payload_i].contains("paddle") { "  (adds the paddle to the safety model)" } else { "" })),
         ];
         for (i, (name, val)) in settings.iter().enumerate() {
             let r = 12 + i;
@@ -492,8 +523,9 @@ impl App {
                 r.push(Line::from(format!(" table {:.0} mm{}", t * 1e3, if self.sim_table { "  (simulated)" } else { "" })));
                 r.push(Line::from(format!(" margin {:.0} mm", self.sc.margin_m * 1e3)));
                 if let Some(b) = base {
-                    r.push(Line::from(format!(" clearance at base {:.0} mm", safety::clearance(&self.sc, &b).unwrap_or(f64::NAN) * 1e3)));
+                    r.push(Line::from(format!(" clearance at base {:.0} mm", safety::clearance(&sc, &b).unwrap_or(f64::NAN) * 1e3)));
                 }
+                r.push(Line::from(format!(" model: gripper{}", if sc.with_paddle { " + paddle" } else { " (no paddle)" })));
             }
             None => {
                 r.push(Line::from(Span::styled(" table height NOT SET", Style::new().fg(Color::Red).bold())));
@@ -517,6 +549,24 @@ impl App {
     }
 
     fn draw_running(&self, f: &mut Frame, area: Rect) {
+        let frozen = matches!(self.mode, Mode::Running { frozen: Some(_), .. });
+        let [banner, area] = Layout::vertical([Constraint::Length(if frozen { 5 } else { 3 }), Constraint::Min(0)]).areas(area);
+        let (text, style) = if frozen {
+            (
+                vec![
+                    Line::from(Span::styled(" ■ SAFETY STOP: the arm is frozen where it is (torque on, nothing moves)", Style::new().fg(Color::White).bold())),
+                    Line::from(""),
+                    Line::from(Span::styled(" r  return slowly to base        q  leave it here and end the run", Style::new().fg(Color::White))),
+                ],
+                Style::new().bg(Color::Red),
+            )
+        } else {
+            (
+                vec![Line::from(Span::styled(" SPACE = SAFETY STOP: freezes the arm where it is · Esc = stop and return to base", Style::new().fg(Color::Red).bold()))],
+                Style::new(),
+            )
+        };
+        f.render_widget(Paragraph::new(text).style(style).block(Block::bordered().border_style(Style::new().fg(Color::Red))), banner);
         let [top, mid, bottom] = Layout::vertical([Constraint::Length(3), Constraint::Min(12), Constraint::Length(9)]).areas(area);
         let label = match self.joint {
             Some((id, i, n)) => format!("M{id} {} · joint {} of {} · {}", NAMES[id as usize - 1], i + 1, n, self.seg),

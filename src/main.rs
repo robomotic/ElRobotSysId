@@ -33,7 +33,7 @@ use session::{Base, Event, SessionOpts, Test};
 use settings::Settings;
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 #[derive(Parser, Debug)]
@@ -56,8 +56,9 @@ struct Cli {
     /// Servo acceleration register during the tests (0 = servo maximum). Restored afterwards.
     #[arg(long, default_value_t = 0)]
     acc: u8,
-    /// Label for what the arm carries, e.g. paddle, none, paddle+ball. Goes into the folder name and meta.
-    #[arg(long, default_value = "paddle")]
+    /// What the arm carries: none (normal for system ID), paddle, paddle+ball. Goes into the folder name and meta;
+    /// "paddle…" also adds the paddle to the table safety model.
+    #[arg(long, default_value = "none")]
     payload: String,
     #[arg(long, value_enum, value_delimiter = ',', default_values_t = [Test::Hold, Test::Steps, Test::Reversals, Test::Ramp, Test::Chirp])]
     tests: Vec<Test>,
@@ -126,7 +127,9 @@ async fn main() -> Result<()> {
         println!("table height {z:.0} mm saved to {} (margin {:.0} mm)", cli.safety.display(), sc.margin_m * 1e3);
         return Ok(());
     }
+    let sc_run = opts.safety(&sc);
     if cli.show_clearance {
+        let sc = &sc_run;
         let mut bus = bus::Bus::open(&cfg.port, cfg.timeout_ms)?;
         let p = bus.read_positions(&[1, 2, 3, 4, 5, 6, 7]).await?;
         let q = sc.angles(&p);
@@ -135,12 +138,13 @@ async fn main() -> Result<()> {
         for (j, pt) in joints.iter().enumerate() {
             println!("  M{} joint  z {:>6.0} mm", j + 1, pt.z * 1e3);
         }
-        for (c, rad) in &sc.tool_spheres {
+        println!("  (payload '{}': paddle {}in the model)", opts.payload, if sc.with_paddle { "" } else { "not " });
+        for (c, rad) in sc.spheres() {
             let pt = g + r * nalgebra::Vector3::from(*c);
             println!("  tool sphere r {:>3.0} mm: centre z {:>6.0} mm, bottom {:>6.0} mm", rad * 1e3, pt.z * 1e3, (pt.z - rad) * 1e3);
         }
-        println!("  lowest modelled point {:.0} mm", safety::lowest_z(&sc, &q) * 1e3);
-        match safety::clearance(&sc, &p) {
+        println!("  lowest modelled point {:.0} mm", safety::lowest_z(sc, &q) * 1e3);
+        match safety::clearance(sc, &p) {
             Some(c) => println!("  clearance above the table {:.0} mm (margin {:.0} mm)", c * 1e3, sc.margin_m * 1e3),
             None => println!("  table height not set (--set-table-z-mm)"),
         }
@@ -171,8 +175,8 @@ async fn main() -> Result<()> {
                 if opts.base == Base::Current {
                     println!("(dry run: clearance shown for the level pose; the real run checks the actual pose)");
                 }
-                let rows = session::clearance_rows(&sc, &b, &opts.joints, reach);
-                for l in session::clearance_lines(&sc, &b, &rows, reach) {
+                let rows = session::clearance_rows(&sc_run, &b, &opts.joints, reach);
+                for l in session::clearance_lines(&sc_run, &b, &rows, reach) {
                     println!("{l}");
                 }
             }
@@ -182,12 +186,18 @@ async fn main() -> Result<()> {
     }
 
     let mut bus = bus::Bus::open(&cfg.port, cfg.timeout_ms)?;
-    let stop = Arc::new(AtomicBool::new(false));
+    // Ctrl-C: stop and return gently to base. A second Ctrl-C skips the moves back: the arm stays where it is.
+    let stop = Arc::new(AtomicU8::new(session::ctl::RUN));
     {
         let stop = stop.clone();
         tokio::spawn(async move {
             if tokio::signal::ctrl_c().await.is_ok() {
-                stop.store(true, Ordering::Relaxed);
+                stop.store(session::ctl::RETURN, Ordering::Relaxed);
+                println!("\nstopping: returning to base (Ctrl-C again: stay where it is)");
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    stop.store(session::ctl::LEAVE, Ordering::Relaxed);
+                    println!("\nthe arm stays where it is");
+                }
             }
         });
     }
@@ -208,6 +218,7 @@ async fn main() -> Result<()> {
         Event::Status(s) => println!("{s}"),
         Event::JointStart { id, base, .. } => println!("\nM{id}: base {base}, running {per_joint:.0} s..."),
         Event::JointDone(js) => js.lines().iter().for_each(|l| println!("{l}")),
+        Event::Frozen { id } => println!("M{id} frozen in place"),
         _ => {}
     };
     match session::run_session(&mut bus, &opts, &sc, &stop, confirm, &mut emit).await? {

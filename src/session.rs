@@ -9,7 +9,19 @@ use clap::ValueEnum;
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
+
+/// Run control shared with the UI (an `AtomicU8`).
+pub mod ctl {
+    /// Keep going.
+    pub const RUN: u8 = 0;
+    /// SAFETY STOP: freeze the arm where it is (goal = present position, torque stays on) and wait for a decision.
+    pub const FREEZE: u8 = 1;
+    /// Stop gently: the joint returns to base, then the arm to its start pose.
+    pub const RETURN: u8 = 2;
+    /// After a freeze: leave the arm where it is and end the run.
+    pub const LEAVE: u8 = 3;
+}
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -265,7 +277,7 @@ pub async fn run_joint(
     base7: &[u16; 7],
     sc: &safety::SafetyConfig,
     segs: &[Segment],
-    stop: &AtomicBool,
+    stop: &AtomicU8,
     csv: &mut impl std::io::Write,
     emit: &mut impl FnMut(Event),
     total_s: f64,
@@ -279,8 +291,15 @@ pub async fn run_joint(
     for (si, seg) in segs.iter().enumerate() {
         let t0 = Instant::now();
         loop {
-            if stop.load(Ordering::Relaxed) {
-                return Ok((samples, Some("stopped by the user".into())));
+            match stop.load(Ordering::Relaxed) {
+                ctl::RUN => {}
+                ctl::RETURN => return Ok((samples, Some("stopped by the user".into()))),
+                _ => {
+                    // SAFETY STOP: hold exactly where the joint is now.
+                    let here = io.read_state(id).await.map(|s| s.position).unwrap_or(last_goal);
+                    io.write_goals(&[(id, here)]).await?;
+                    return Ok((samples, Some(format!("SAFETY STOP at {here} in {}", seg.name))));
+                }
             }
             let ts = t0.elapsed().as_secs_f64();
             if ts >= seg.dur {
@@ -515,6 +534,8 @@ pub enum Event {
     JointStart { id: u8, index: usize, of: usize, base: u16 },
     Sample { id: u8, t: f64, seg: String, goal: u16, pos: u16, current: f64, load: i16, progress: f64 },
     JointDone(JointSummary),
+    /// SAFETY STOP: joint `id` is frozen in place; waiting for RETURN or LEAVE.
+    Frozen { id: u8 },
     Finished { dir: Option<PathBuf>, error: Option<String> },
 }
 
@@ -533,6 +554,13 @@ pub struct SessionOpts {
 }
 
 impl SessionOpts {
+    /// Safety config for this run: the paddle spheres count only when the payload says the paddle is mounted.
+    pub fn safety(&self, sc: &SafetyConfig) -> SafetyConfig {
+        let mut s = sc.clone();
+        s.with_paddle = self.payload.contains("paddle");
+        s
+    }
+
     pub fn level7(&self) -> Option<[u16; 7]> {
         self.level.map(|l| {
             let mut b = [0u16; 7];
@@ -549,10 +577,11 @@ pub async fn run_session<I: Io>(
     io: &mut I,
     o: &SessionOpts,
     sc: &SafetyConfig,
-    stop: &AtomicBool,
+    stop: &AtomicU8,
     confirm: impl FnOnce(&[u16], &[u16; 7]) -> bool,
     emit: &mut impl FnMut(Event),
 ) -> Result<Option<PathBuf>> {
+    let sc = &o.safety(sc);
     for &j in &o.joints {
         if !(1..=7).contains(&j) {
             bail!("joints must be 1-7 (M8, the gripper, is never excited)");
@@ -630,7 +659,14 @@ pub async fn run_session<I: Io>(
     let _ = writeln!(meta, "# elrobot-sysid run{}\nstamp = {stamp}\npayload = \"{}\"\nport = \"{}\"", if io.kind() == "sim" { " (SIMULATED servos)" } else { "" }, o.payload, o.port);
     let _ = writeln!(meta, "base_ticks = {:?}\npresent_at_start = {:?}\nmax_amp_ticks = {}\nacc = {}", base7, present, o.max_amp, o.acc);
     let _ = writeln!(meta, "joints = {:?}\ntests = {:?}\ngrip = {:?}\n", o.joints, o.tests, o.grip);
-    let _ = writeln!(meta, "[safety]\ntable_z_m = {:?}\nmargin_m = {}\ntool_spheres = {:?}\n", sc.table_z_m, sc.margin_m, sc.tool_spheres);
+    let _ = writeln!(
+        meta,
+        "[safety]\ntable_z_m = {:?}\nmargin_m = {}\nwith_paddle = {}\nspheres = {:?}\n",
+        sc.table_z_m,
+        sc.margin_m,
+        sc.with_paddle,
+        sc.spheres().collect::<Vec<_>>()
+    );
     for id in 1..=8u8 {
         match read_servo_info(io, id).await {
             Ok(info) => info.describe(&mut meta, id),
@@ -648,8 +684,18 @@ pub async fn run_session<I: Io>(
         let mut csv = std::io::BufWriter::new(std::fs::File::create(dir.join(format!("M{id}.csv")))?);
         let (samples, reason) = run_joint(io, id, base, &base7, sc, &segs, stop, &mut csv, emit, per_joint).await?;
         csv.flush()?;
-        let at = io.read_state(id).await.map(|s| s.position).unwrap_or(base);
-        move_joint(io, id, at, base, 0.8).await?;
+        if stop.load(Ordering::Relaxed) == ctl::FREEZE {
+            emit(Event::Frozen { id });
+            // Nothing moves until the user decides: return slowly, or leave the arm here.
+            while stop.load(Ordering::Relaxed) == ctl::FREEZE {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+        let leave = stop.load(Ordering::Relaxed) == ctl::LEAVE;
+        if !leave {
+            let at = io.read_state(id).await.map(|s| s.position).unwrap_or(base);
+            move_joint(io, id, at, base, if reason.is_some() { 2.0 } else { 0.8 }).await?;
+        }
         io.write_acc(id, old_acc).await?;
         let mut js = summarize(id, &segs, &samples);
         js.stopped = reason.clone();
@@ -661,7 +707,7 @@ pub async fn run_session<I: Io>(
             break;
         }
     }
-    if base7 != now7 {
+    if base7 != now7 && stop.load(Ordering::Relaxed) != ctl::LEAVE {
         emit(Event::Status("returning to the start pose...".into()));
         move_all(io, base7, now7, 3.0).await?;
     }
@@ -676,6 +722,93 @@ pub async fn run_session<I: Io>(
 mod tests {
     use super::*;
     use crate::bus::MotorState;
+
+    /// SAFETY STOP on simulated servos: the joint freezes where it is and stays there until the user decides;
+    /// "return" then brings it back to base.
+    #[test]
+    fn safety_stop_freezes_then_returns() {
+        use crate::io::{Io, SimIo};
+        use std::sync::Arc;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let level = [2003u16, 1002, 1942, 3185, 1864, 1892, 2226, 1436];
+            let mut sc = SafetyConfig::default();
+            let l7 = [level[0], level[1], level[2], level[3], level[4], level[5], level[6]];
+            sc.table_z_m = Some(safety::lowest_z(&sc, &sc.angles(&l7)) - 0.3);
+            let out = std::env::temp_dir().join(format!("sysid-stop-test-{}", std::process::id()));
+            let o = SessionOpts {
+                joints: vec![6],
+                tests: vec![Test::Steps],
+                max_amp: 100.0,
+                acc: 0,
+                base: Base::Level,
+                payload: "none".into(),
+                out: out.clone(),
+                grip: None,
+                level: Some(level),
+                port: "sim".into(),
+            };
+            let stop = Arc::new(AtomicU8::new(ctl::RUN));
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let (stop2, o2, sc2) = (stop.clone(), o.clone(), sc.clone());
+            let task = tokio::spawn(async move {
+                let mut io = SimIo::new(level);
+                let mut emit = |e: Event| {
+                    let _ = tx.send(e);
+                };
+                let r = run_session(&mut io, &o2, &sc2, &stop2, |_, _| true, &mut emit).await;
+                (r.map_err(|e| e.to_string()), io.read_state(6).await.unwrap().position)
+            });
+            // Let it run into the first steps, then press SAFETY STOP.
+            tokio::time::sleep(Duration::from_millis(2600)).await;
+            stop.store(ctl::FREEZE, Ordering::Relaxed);
+            let mut frozen = false;
+            let t0 = Instant::now();
+            while t0.elapsed() < Duration::from_millis(1500) {
+                while let Ok(e) = rx.try_recv() {
+                    match e {
+                        Event::Frozen { id } => {
+                            assert_eq!(id, 6);
+                            frozen = true;
+                        }
+                        Event::Sample { .. } => assert!(!frozen, "no test samples after the freeze"),
+                        _ => {}
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(frozen, "the session reported the freeze");
+            // While frozen, nothing moves: the session is waiting, not driving the joint.
+            assert!(!task.is_finished(), "waits for the user's decision");
+            stop.store(ctl::RETURN, Ordering::Relaxed);
+            let (res, end) = task.await.unwrap();
+            assert!(res.unwrap_err().contains("SAFETY STOP"), "the run ends as stopped");
+            assert!((end as i32 - level[5] as i32).abs() <= 12, "back near base after 'return': {end}");
+            let _ = std::fs::remove_dir_all(out);
+        });
+    }
+
+    #[test]
+    fn safety_stop_holds_position_while_frozen() {
+        use crate::io::{Io, SimIo};
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let mut io = SimIo::new([2048; 8]);
+            io.write_goals(&[(6, 2148)]).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            // What the freeze does: goal := present.
+            let here = io.read_state(6).await.unwrap().position;
+            io.write_goals(&[(6, here)]).await.unwrap();
+            // A moving joint coasts for one transport delay (~30 ms) and settles at the edge of its dead zone
+            // around the freeze point (observed: 2096 -> 2110 -> 2106 for M6). After that it must not move at all.
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            let a = io.read_state(6).await.unwrap().position as i32;
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            let b = io.read_state(6).await.unwrap().position as i32;
+            assert!((a - b).abs() <= 1, "frozen joint does not keep moving: {a} -> {b}");
+            assert!((b - here as i32).abs() <= 20, "coast + dead zone stay small: {here} -> {b}");
+        });
+    }
 
     #[test]
     fn plan_respects_max_amp() {

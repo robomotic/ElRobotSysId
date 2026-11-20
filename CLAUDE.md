@@ -15,6 +15,12 @@ SimIo), src/tui.rs (Setup with live safety per joint, Running with goal-vs-posit
 Screenshots in docs/screenshots (regenerate with PingPongSimBot/tools/tui_drive.py `p:` steps). On simulated M6 it
 recovers the simulated delay/lag/dead zone (dead 32 ms, t63 99 ms, miss 10, slop 24).
 
+**Safety additions (user, 2026-11-20):** the paddle is NOT on the arm during sysid (payload defaults to `none`; the
+paddle spheres are added only for payload "paddle…"). The wrist camera IS always on: it's in `tool_spheres` (80 mm
+sphere around the gripper motor until its direction in the URDF frame is registered; U20CAM 27 mm mount = 24×35×67 mm).
+SAFETY STOP: Space in the app freezes (goal = present, torque on), then r = return slowly, q = leave; `session::ctl`
+RUN/FREEZE/RETURN/LEAVE. A moving joint coasts ~1° (one 30 ms command delay) and settles in its dead zone.
+
 ## Status (2026-11-20)
 - Written and unit-tested. Built on the Pi earlier (inside `~/paddle-ws`, as a second binary of paddle-balance).
   **Not yet run on the arm.** The user will do the system ID later.

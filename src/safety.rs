@@ -31,8 +31,15 @@ pub struct SafetyConfig {
     pub table_z_m: Option<f64>,
     /// Minimum allowed clearance (m) between any modelled point/sphere and the table.
     pub margin_m: f64,
-    /// Spheres (centre in the gripper-base frame, metres; radius) enclosing the gripper and the paddle.
+    /// Spheres (centre in the gripper-base frame, metres; radius) enclosing the gripper (motor, jaws) and the wrist
+    /// camera, which is always mounted.
     pub tool_spheres: Vec<([f64; 3], f64)>,
+    /// Extra spheres for the paddle (Ø150 mm blade beyond the jaws). Only used when a run says the paddle is mounted
+    /// (payload "paddle…"); system identification normally runs without it.
+    pub paddle_spheres: Vec<([f64; 3], f64)>,
+    /// Set per run from the payload, not stored.
+    #[serde(skip)]
+    pub with_paddle: bool,
     /// rad = sign * (tick - zero) * 2pi/4096 for M1..M7 (same convention as PingPongSimBot).
     pub sign: [f64; 7],
     pub zero: [f64; 7],
@@ -43,9 +50,14 @@ impl Default for SafetyConfig {
         Self {
             table_z_m: None,
             margin_m: 0.03,
-            // Conservative: the jaws (~60 mm past the gripper motor) and the Ø150 mm paddle beyond them.
-            // The paddle direction relative to the gripper frame is not measured, so its sphere is large.
-            tool_spheres: vec![([0.0, 0.045, 0.0], 0.04), ([0.0, 0.10, 0.0], 0.05), ([0.0, 0.17, 0.0], 0.11)],
+            // The gripper motor, the jaws (~60 mm past the motor), and the wrist camera: the U20CAM on its 27 mm mount
+            // sticks out up to 67 mm from the gripper (STL 24 x 35 x 67 mm), lens ~55 mm off the jaw axis (RoboSim
+            // #73). Its direction in the URDF gripper frame is not registered yet, so it is a sphere of 80 mm around
+            // the gripper motor: covers the camera whichever way it points. Tighten after --show-clearance checks.
+            tool_spheres: vec![([0.0, 0.045, 0.0], 0.04), ([0.0, 0.10, 0.0], 0.05), ([0.0, 0.045, 0.0], 0.08)],
+            // The Ø150 mm paddle beyond the jaws; its direction in the gripper frame is not measured, so it is large.
+            paddle_spheres: vec![([0.0, 0.17, 0.0], 0.11)],
+            with_paddle: false,
             sign: [-1.0; 7],
             zero: [2048.0; 7],
         }
@@ -53,6 +65,11 @@ impl Default for SafetyConfig {
 }
 
 impl SafetyConfig {
+    /// The spheres in use: the gripper, plus the paddle when it is mounted.
+    pub fn spheres(&self) -> impl Iterator<Item = &([f64; 3], f64)> {
+        self.tool_spheres.iter().chain(self.paddle_spheres.iter().filter(move |_| self.with_paddle))
+    }
+
     pub fn tick_to_rad(&self, j: usize, tick: f64) -> f64 {
         self.sign[j] * (tick - self.zero[j]) * std::f64::consts::TAU / 4096.0
     }
@@ -86,7 +103,7 @@ pub fn lowest_z(cfg: &SafetyConfig, q: &[f64; 7]) -> f64 {
     let (joints, r, p) = fk(q);
     let mut z = joints[1..].iter().map(|j| j.z).fold(f64::INFINITY, f64::min);
     z = z.min((p + r * Vector3::from(GRIPPER_MOTOR)).z);
-    for (c, rad) in &cfg.tool_spheres {
+    for (c, rad) in cfg.spheres() {
         z = z.min((p + r * Vector3::from(*c)).z - rad);
     }
     z
@@ -154,6 +171,19 @@ mod tests {
         q[0] += 1.0; // M1 turns about (almost) vertical: heights barely change
         let z1 = lowest_z(&SafetyConfig::default(), &q);
         assert!((z0 - z1).abs() < 0.005, "{z0} vs {z1}");
+    }
+
+    #[test]
+    fn the_paddle_only_counts_when_mounted() {
+        let mut cfg = SafetyConfig::default();
+        let q = cfg.angles(&[2003u16, 1002, 1942, 3185, 1864, 1892, 2226]);
+        let without = lowest_z(&cfg, &q);
+        cfg.with_paddle = true;
+        let with = lowest_z(&cfg, &q);
+        assert!(with <= without, "the paddle can only make the lowest point lower");
+        assert_eq!(cfg.spheres().count(), 4);
+        cfg.with_paddle = false;
+        assert_eq!(cfg.spheres().count(), 3);
     }
 
     #[test]

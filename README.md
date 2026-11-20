@@ -35,7 +35,9 @@ About **74 s per joint**: about 3.7 min for the wrist (M5–M7). 4096 ticks = on
 
 ![Setup: joints and tests to identify, with the safety clearance of every joint](docs/screenshots/tui-setup.png)
 
-![Running: goal vs position of the joint under test, live](docs/screenshots/tui-running.png)
+![Running: goal vs position of the joint under test, live; Space = SAFETY STOP](docs/screenshots/tui-running.png)
+
+![SAFETY STOP: the arm is frozen where it is until you choose to return or leave it](docs/screenshots/tui-frozen.png)
 
 <details>
 <summary>More: confirmation, results, and the line-based dry run</summary>
@@ -63,8 +65,14 @@ With an uncalibrated geometry every joint reads **TOO CLOSE**, the expected fail
 | ← → | amplitude, acceleration, base pose, payload |
 | Enter | start (real arm: needs ARMED and a measured table height; asks first) |
 | a | ARM / disarm (switches itself off after 30 s without a key) |
-| Esc | while running: stop, the joint returns to base · otherwise quit |
+| **Space** | **while running: SAFETY STOP**: freezes the arm where it is (goal = present position, torque stays on so nothing drops). Then `r` returns slowly to base, `q` leaves it there |
+| Esc | while running: stop gently, the joint returns to base · otherwise quit |
+| Ctrl-C | emergency: freeze, leave the arm where it is, quit |
 | ? | help |
+
+A frozen joint stops within one command delay (~30 ms). If it was moving fast it coasts about 1° and settles inside
+its dead zone; after that it does not move until you press `r`. The line-based run (`--cli`): Ctrl-C stops and
+returns to base; a second Ctrl-C skips the moves back.
 
 Each joint's safety clearance over its whole sweep is shown live while you choose. A joint that would come within the
 margin of the table shows **✗** with the largest safe amplitude, and the run refuses to start.
@@ -75,7 +83,7 @@ margin of the table shows **✗** with the largest safe amplitude, and the run r
 curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
 sudo apt install protobuf-compiler libudev-dev    # st3215 build.rs (protoc), serial port
 cargo build --release
-cargo test                                        # 11 tests: signals, estimators, safety, simulated servo, settings
+cargo test                                        # 14 tests: signals, estimators, safety (incl. stop), simulated servo, settings
 ```
 
 `st3215` (the ST3215 packet codec and register map) comes from [norma-core](https://github.com/norma-core/norma-core) as a pinned git
@@ -90,7 +98,7 @@ B=target/release/elrobot-sysid
 $B --sim                                       # full-screen app, simulated servos: try it anywhere
 $B                                             # full-screen app on the real arm
 $B --dry-run                                   # plan + safety report; nothing moves
-$B --cli --joints 5,6,7 --payload paddle       # line-based run on the wrist; asks [y/N] first
+$B --cli --joints 5,6,7                        # line-based run on the wrist (no paddle); asks [y/N] first
 $B --cli --joints 1,2,3,4 --payload none --max-amp 50   # shoulder/elbow, paddle removed, smaller moves
 
 sudo systemctl start normacore-station
@@ -124,8 +132,12 @@ $B --set-table-z-mm 0               # MEASURED table height in the robot base fr
 $B --dry-run --base level           # per joint: lowest clearance over the planned sweep, and the largest safe --max-amp
 ```
 
-- Forward kinematics with positions (URDF joint origins); the gripper and paddle are modelled as spheres in the
-  gripper frame (`tool_spheres` in `sysid_safety.toml`, conservative by default).
+- Forward kinematics with positions (URDF joint origins). The gripper (motor, jaws) and the **wrist camera** (always
+  mounted: U20CAM on its 27 mm mount, up to 67 mm from the gripper) are modelled as spheres in the gripper frame
+  (`tool_spheres` in `sysid_safety.toml`). The camera's direction in the URDF frame is not registered yet, so its sphere
+  (80 mm around the gripper motor) covers it whichever way it points.
+- The **paddle is not modelled** by default: system identification runs without it. Choose payload `paddle` (or
+  `paddle+ball`) and its sphere (`paddle_spheres`) is added.
 - Before anything is written to the servos: every joint's full planned sweep (and the move to the base pose) must stay
   at least `margin_m` (30 mm) above the table, or the run is refused with the largest safe amplitude per joint.
 - While running: the measured pose is checked every sample; below the margin the joint stops and returns to base.
