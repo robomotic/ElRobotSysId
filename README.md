@@ -27,6 +27,23 @@ position, speed, load and current at the **full bus rate** (several hundred Hz, 
 
 About **74 s per joint**: about 3.7 min for the wrist (M5–M7). 4096 ticks = one turn (1 tick ≈ 0.088°).
 
+## What it looks like
+
+`elrobot-sysid` is a command-line tool (no full-screen app yet). A dry run prints the test plan and the safety report,
+and moves nothing:
+
+![Dry run: test plan, and refusal while the table height is not set](docs/screenshots/dry-run-no-table.png)
+
+<details>
+<summary>Dry run with a table height set: per-joint clearance and the largest safe amplitude</summary>
+
+![Dry run with the safety report for all 7 joints](docs/screenshots/dry-run-safety.png)
+
+Every joint reads **TOO CLOSE** here. That is the expected fail-safe result while the geometry is not calibrated on the
+real arm (see [Table safety area](#table-safety-area-required-before-any-run)): the model puts the tool below the base at
+the level pose, so nothing is allowed to move.
+</details>
+
 ## Build (on the Pi)
 
 ```bash
