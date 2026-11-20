@@ -57,9 +57,6 @@ impl Settings {
         })
     }
 
-    pub fn level(&self) -> Result<[u16; 8]> {
-        self.level.context("no level pose: pass --config pointing at a paddle.toml with [poses].level, or use --base current")
-    }
 }
 
 #[cfg(test)]

@@ -27,22 +27,47 @@ position, speed, load and current at the **full bus rate** (several hundred Hz, 
 
 About **74 s per joint**: about 3.7 min for the wrist (M5–M7). 4096 ticks = one turn (1 tick ≈ 0.088°).
 
-## What it looks like
+## Full-screen app
 
-`elrobot-sysid` is a command-line tool (no full-screen app yet). A dry run prints the test plan and the safety report,
-and moves nothing:
+`elrobot-sysid` with no arguments opens a keyboard-driven app (the same keys as
+[PingPongSimBot](https://github.com/robomotic/PingPongSimBot)); `elrobot-sysid --sim` runs it on **simulated servos**
+(transport delay, first-order lag, per-joint dead zones as measured on the real arm), so nothing moves.
+
+![Setup: joints and tests to identify, with the safety clearance of every joint](docs/screenshots/tui-setup.png)
+
+![Running: goal vs position of the joint under test, live](docs/screenshots/tui-running.png)
+
+<details>
+<summary>More: confirmation, results, and the line-based dry run</summary>
+
+![Confirmation before anything moves](docs/screenshots/tui-confirm.png)
+
+![Results: per-joint summary (dead time, t63, overshoot, steady miss, slop, currents)](docs/screenshots/tui-results.png)
+
+On the simulated M6 (30 ms delay, 70 ms lag, 20-tick dead zone) it measures a dead time of 32 ms, t63 of 99 ms, a steady
+miss of 10 ticks (half the dead zone) and 24 ticks of slop: the method recovers what it is meant to find.
+
+Line-based dry run (plan + safety report, no motion):
 
 ![Dry run: test plan, and refusal while the table height is not set](docs/screenshots/dry-run-no-table.png)
 
-<details>
-<summary>Dry run with a table height set: per-joint clearance and the largest safe amplitude</summary>
-
 ![Dry run with the safety report for all 7 joints](docs/screenshots/dry-run-safety.png)
 
-Every joint reads **TOO CLOSE** here. That is the expected fail-safe result while the geometry is not calibrated on the
-real arm (see [Table safety area](#table-safety-area-required-before-any-run)): the model puts the tool below the base at
-the level pose, so nothing is allowed to move.
+With an uncalibrated geometry every joint reads **TOO CLOSE**, the expected fail-safe result (see the safety section).
 </details>
+
+| Key | |
+|---|---|
+| ↑ ↓ | move between joints, tests and settings |
+| Space | tick / untick a joint or test |
+| ← → | amplitude, acceleration, base pose, payload |
+| Enter | start (real arm: needs ARMED and a measured table height; asks first) |
+| a | ARM / disarm (switches itself off after 30 s without a key) |
+| Esc | while running: stop, the joint returns to base · otherwise quit |
+| ? | help |
+
+Each joint's safety clearance over its whole sweep is shown live while you choose. A joint that would come within the
+margin of the table shows **✗** with the largest safe amplitude, and the run refuses to start.
 
 ## Build (on the Pi)
 
@@ -50,7 +75,7 @@ the level pose, so nothing is allowed to move.
 curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
 sudo apt install protobuf-compiler libudev-dev    # st3215 build.rs (protoc), serial port
 cargo build --release
-cargo test                                        # 7 tests: signals, step/slop estimators, settings
+cargo test                                        # 11 tests: signals, estimators, safety, simulated servo, settings
 ```
 
 `st3215` (the ST3215 packet codec and register map) comes from [norma-core](https://github.com/norma-core/norma-core) as a pinned git
@@ -62,10 +87,11 @@ dependency.
 sudo systemctl stop normacore-station          # this tool needs exclusive use of the follower bus
 B=target/release/elrobot-sysid
 
-$B --dry-run                                   # the plan and its duration; nothing moves
-$B --joints 5,6,7 --payload paddle             # wrist with the paddle in the gripper; asks [y/N] first
-$B --joints 1,2,3,4 --payload none --max-amp 50   # shoulder/elbow, paddle removed, smaller moves
-$B --joints 6 --tests steps,reversals --acc 100    # a subset, with the acceleration paddle-balance uses
+$B --sim                                       # full-screen app, simulated servos: try it anywhere
+$B                                             # full-screen app on the real arm
+$B --dry-run                                   # plan + safety report; nothing moves
+$B --cli --joints 5,6,7 --payload paddle       # line-based run on the wrist; asks [y/N] first
+$B --cli --joints 1,2,3,4 --payload none --max-amp 50   # shoulder/elbow, paddle removed, smaller moves
 
 sudo systemctl start normacore-station
 ```
@@ -81,7 +107,9 @@ Options:
 | `--acc` | servo acceleration register during the tests (0 = servo maximum); restored afterwards |
 | `--tests` | any of `hold,steps,reversals,ramp,chirp` |
 | `--payload` | label for what the arm carries: goes into the folder name and the metadata |
-| `--yes` | skip the confirmation |
+| `--cli` | line-based run instead of the full-screen app |
+| `--sim` | full-screen app with simulated servos |
+| `--yes` | skip the confirmation (line-based run) |
 | `--safety sysid_safety.toml` | table height, margin, tool spheres, tick→angle convention |
 | `--set-table-z-mm` | record the measured table height (base frame) and exit |
 | `--show-clearance` | read-only: modelled heights and clearance at the current pose |

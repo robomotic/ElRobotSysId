@@ -8,6 +8,13 @@ ramp, chirp) at the full bus rate, for a MuJoCo model (RoboSim #69 Phase 1, sim2
 robomotic/PingPongSimBot (ball balancing). Its findings motivated this tool: ~150 ms servo lag and ~20 ticks of tracking error
 on M6 cause a 1 Hz limit cycle.
 
+## Full-screen app (2026-11-20)
+`elrobot-sysid` (no args) = TUI, `--sim` = simulated servos (src/io.rs SimIo), `--cli` = line-based run, `--dry-run`.
+Code: src/session.rs (plan, run_session on any `Io`, summaries, clearance rows, events), src/io.rs (`Io` trait: Bus +
+SimIo), src/tui.rs (Setup with live safety per joint, Running with goal-vs-position chart, Results table).
+Screenshots in docs/screenshots (regenerate with PingPongSimBot/tools/tui_drive.py `p:` steps). On simulated M6 it
+recovers the simulated delay/lag/dead zone (dead 32 ms, t63 99 ms, miss 10, slop 24).
+
 ## Status (2026-11-20)
 - Written and unit-tested. Built on the Pi earlier (inside `~/paddle-ws`, as a second binary of paddle-balance).
   **Not yet run on the arm.** The user will do the system ID later.

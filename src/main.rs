@@ -16,42 +16,25 @@
 //! Output: `<out>/<stamp>_<payload>/` with `meta.toml` (servo EEPROM + RAM settings per joint, base pose, arguments,
 //! summary) and one `M<n>.csv` per joint. Ctrl-C (or a safety stop) returns the joint to the base pose.
 //!
-//!   sudo systemctl stop normacore-station
-//!   elrobot-sysid --joints 5,6,7 --payload paddle --dry-run     # show the plan, no motion
-//!   elrobot-sysid --joints 5,6,7 --payload paddle               # asks for confirmation, then runs
+//!   elrobot-sysid                      # full-screen app (real arm); `elrobot-sysid --sim` without the arm
+//!   elrobot-sysid --dry-run            # plan + safety report, no motion
+//!   elrobot-sysid --joints 5,6,7 --payload paddle --cli    # line-based run (asks for confirmation)
 
-use anyhow::{bail, Context, Result};
-use clap::{Parser, ValueEnum};
 mod bus;
+mod io;
 mod safety;
+mod session;
 mod settings;
+mod tui;
 
-use bus::{Bus, MotorState};
+use anyhow::{Context, Result};
+use clap::Parser;
+use session::{Base, Event, SessionOpts, Test};
 use settings::Settings;
-use st3215::protocol::RamRegister;
-use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum Test {
-    Hold,
-    Steps,
-    Reversals,
-    Ramp,
-    Chirp,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum Base {
-    /// Where the arm is now (no move before the tests).
-    Current,
-    /// The `level` pose from the paddle.toml (min-jerk move there first).
-    Level,
-}
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Per-joint ST3215 system identification for the ElRobot follower")]
@@ -80,10 +63,16 @@ struct Cli {
     tests: Vec<Test>,
     #[arg(long, default_value = "sysid_logs")]
     out: PathBuf,
-    /// Print the plan and its duration, move nothing.
+    /// Print the plan and the safety report, move nothing.
     #[arg(long)]
     dry_run: bool,
-    /// Skip the confirmation prompt.
+    /// Run line-based on the real arm instead of opening the full-screen app.
+    #[arg(long)]
+    cli: bool,
+    /// Full-screen app with SIMULATED servos: nothing moves, no hardware needed.
+    #[arg(long)]
+    sim: bool,
+    /// Skip the confirmation prompt (line-based run).
     #[arg(long)]
     yes: bool,
     /// Table safety area (issue #1): table height, margin, tool spheres. Created by --set-table-z-mm.
@@ -99,7 +88,7 @@ struct Cli {
     show_clearance: bool,
 }
 
-fn load_safety(path: &std::path::Path) -> Result<safety::SafetyConfig> {
+pub fn load_safety(path: &std::path::Path) -> Result<safety::SafetyConfig> {
     if !path.exists() {
         return Ok(safety::SafetyConfig::default());
     }
@@ -107,420 +96,30 @@ fn load_safety(path: &std::path::Path) -> Result<safety::SafetyConfig> {
     toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
 }
 
-/// Largest |offset| (ticks) the plan reaches.
-fn plan_reach(segs: &[Segment]) -> f64 {
-    segs.iter().map(|s| (0..=200).map(|i| s.offset(s.dur * i as f64 / 200.0).abs()).fold(0.0, f64::max)).fold(0.0, f64::max)
-}
-
-/// Per-joint clearance report; returns the joints that would break the margin, with their safe amplitude.
-fn clearance_report(sc: &safety::SafetyConfig, base: &[u16; 7], joints: &[u8], reach: f64) -> Vec<(u8, f64)> {
-    let mut bad = Vec::new();
-    let Some(t) = sc.table_z_m else {
-        println!("safety: table height NOT SET ({}): runs on the arm are refused. Measure it and use --set-table-z-mm.", "sysid_safety.toml");
-        return joints.iter().map(|&j| (j, 0.0)).collect();
-    };
-    let base_c = safety::clearance(sc, base).unwrap_or(f64::NAN);
-    println!("safety: table at {:.0} mm, margin {:.0} mm; clearance at the base pose {:.0} mm", t * 1e3, sc.margin_m * 1e3, base_c * 1e3);
-    for &j in joints {
-        let c = safety::sweep_clearance(sc, base, j as usize - 1, reach).unwrap_or(f64::NAN);
-        let ok = c >= sc.margin_m;
-        let amp = safety::safe_amp(sc, base, j as usize - 1, reach);
-        println!(
-            "  M{j}: sweeping ±{reach:.0} ticks, lowest clearance {:.0} mm  {}",
-            c * 1e3,
-            if ok { "ok".to_string() } else { format!("TOO CLOSE: largest safe --max-amp {amp:.0}") }
-        );
-        if !ok {
-            bad.push((j, amp));
-        }
-    }
-    bad
-}
-
-/// Minimum-jerk interpolation factor for tau in [0, 1].
-fn min_jerk(tau: f64) -> f64 {
-    let t = tau.clamp(0.0, 1.0);
-    t * t * t * (10.0 - 15.0 * t + 6.0 * t * t)
-}
-
-// ---------------------------------------------------------------------------------------------------------------
-// Test signals: offsets (ticks) from the base position as a function of time within a segment.
-
-#[derive(Debug, Clone)]
-enum Shape {
-    Hold { at: f64 },
-    /// Jump to `to` at once and stay.
-    Step { to: f64 },
-    Ramp { from: f64, to: f64 },
-    /// Log sweep f0 -> f1 Hz with a 1 s cosine fade in and out.
-    Chirp { amp: f64, f0: f64, f1: f64 },
-}
-
-#[derive(Debug, Clone)]
-struct Segment {
-    name: String,
-    test: Test,
-    dur: f64,
-    shape: Shape,
-}
-
-impl Segment {
-    fn offset(&self, t: f64) -> f64 {
-        let t = t.clamp(0.0, self.dur);
-        match self.shape {
-            Shape::Hold { at } => at,
-            Shape::Step { to } => to,
-            Shape::Ramp { from, to } => from + (to - from) * t / self.dur,
-            Shape::Chirp { amp, f0, f1 } => {
-                let k = f1 / f0;
-                let phase = 2.0 * std::f64::consts::PI * f0 * self.dur / k.ln() * (k.powf(t / self.dur) - 1.0);
-                let fade = |x: f64| if x >= 1.0 { 1.0 } else { 0.5 - 0.5 * (std::f64::consts::PI * x).cos() };
-                amp * phase.sin() * fade(t) * fade(self.dur - t)
-            }
-        }
-    }
-}
-
-fn plan(tests: &[Test], max_amp: f64) -> Vec<Segment> {
-    let mut s = Vec::new();
-    let mut push = |name: String, test: Test, dur: f64, shape: Shape| s.push(Segment { name, test, dur, shape });
-    for &test in tests {
-        match test {
-            Test::Hold => push("hold".into(), test, 2.0, Shape::Hold { at: 0.0 }),
-            Test::Steps => {
-                for a in [10.0, 25.0, 50.0, 100.0f64] {
-                    if a > max_amp {
-                        continue;
-                    }
-                    push(format!("step+{a}"), test, 1.0, Shape::Step { to: a });
-                    push(format!("step+{a}_back"), test, 1.0, Shape::Step { to: 0.0 });
-                    push(format!("step-{a}"), test, 1.0, Shape::Step { to: -a });
-                    push(format!("step-{a}_back"), test, 1.0, Shape::Step { to: 0.0 });
-                }
-            }
-            Test::Reversals => {
-                for a in [5.0, 10.0, 20.0f64] {
-                    if a > max_amp {
-                        continue;
-                    }
-                    push(format!("rev{a}_up"), test, 1.0, Shape::Ramp { from: 0.0, to: a });
-                    push(format!("rev{a}_down"), test, 2.0, Shape::Ramp { from: a, to: -a });
-                    push(format!("rev{a}_back"), test, 1.0, Shape::Ramp { from: -a, to: 0.0 });
-                    push(format!("rev{a}_rest"), test, 0.5, Shape::Hold { at: 0.0 });
-                }
-            }
-            Test::Ramp => {
-                let a = (max_amp / 2.0).min(50.0);
-                let d = a / 15.0;
-                push("ramp_out+".into(), test, d, Shape::Ramp { from: 0.0, to: a });
-                push("ramp_hold+".into(), test, 0.5, Shape::Hold { at: a });
-                push("ramp_across".into(), test, 2.0 * d, Shape::Ramp { from: a, to: -a });
-                push("ramp_hold-".into(), test, 0.5, Shape::Hold { at: -a });
-                push("ramp_back".into(), test, d, Shape::Ramp { from: -a, to: 0.0 });
-            }
-            Test::Chirp => {
-                push("chirp".into(), test, 25.0, Shape::Chirp { amp: 20.0f64.min(max_amp), f0: 0.2, f1: 4.0 });
-                push("chirp_rest".into(), test, 1.0, Shape::Hold { at: 0.0 });
-            }
-        }
-    }
-    s
-}
-
-// ---------------------------------------------------------------------------------------------------------------
-// Logging and on-line summary.
-
-struct Sample {
-    t: f64,
-    seg: usize,
-    goal: u16,
-    st: MotorState,
-}
-
-#[derive(Debug, Default)]
-struct StepStats {
-    amp: f64,
-    dead_ms: f64,
-    t63_ms: f64,
-    overshoot_pct: f64,
-    steady_err: f64,
-}
-
-/// Dead time (first 3-tick move), 63% time, overshoot and final error for one step segment.
-fn step_stats(samples: &[Sample], from: f64, to: f64) -> Option<StepStats> {
-    let first = samples.first()?;
-    let (t0, p0) = (first.t, first.st.position as f64);
-    let amp = to - from;
-    if amp.abs() < 1.0 {
-        return None;
-    }
-    let s = amp.signum();
-    let moved = |p: f64| (p - p0) * s;
-    let dead = samples.iter().find(|x| moved(x.st.position as f64) >= 3.0).map(|x| x.t - t0)?;
-    let t63 = samples.iter().find(|x| moved(x.st.position as f64) >= 0.63 * amp.abs()).map(|x| x.t - t0).unwrap_or(f64::NAN);
-    let peak = samples.iter().map(|x| moved(x.st.position as f64)).fold(f64::MIN, f64::max);
-    let tail: Vec<f64> = samples.iter().filter(|x| x.t - t0 > 0.7).map(|x| x.goal as f64 - x.st.position as f64).collect();
-    let steady = if tail.is_empty() { f64::NAN } else { tail.iter().sum::<f64>() / tail.len() as f64 };
-    Some(StepStats {
-        amp,
-        dead_ms: dead * 1e3,
-        t63_ms: t63 * 1e3,
-        overshoot_pct: ((peak - amp.abs()) / amp.abs() * 100.0).max(0.0),
-        steady_err: steady,
-    })
-}
-
-/// Slop estimate at a reversal: goal travel (ticks) after the turn before the position moves 2 ticks the new way.
-fn reversal_slop(samples: &[Sample], dir: f64) -> Option<f64> {
-    let first = samples.first()?;
-    let g0 = first.goal as f64;
-    // Furthest the position got in the old direction (it may keep going briefly after the goal turns, from lag).
-    let p_extreme = samples.iter().map(|x| x.st.position as f64 * -dir).fold(f64::MIN, f64::max) * -dir;
-    samples
-        .iter()
-        .find(|x| (x.st.position as f64 - p_extreme) * dir >= 2.0)
-        .map(|x| ((x.goal as f64 - g0) * dir).max(0.0))
-}
-
-// ---------------------------------------------------------------------------------------------------------------
-// Servo settings for the model.
-
-struct ServoInfo {
-    eeprom: Vec<u8>,
-    ram: Vec<u8>,
-}
-
-impl ServoInfo {
-    fn u16(&self, a: usize) -> u16 {
-        u16::from_le_bytes([self.eeprom[a], self.eeprom[a + 1]])
-    }
-
-    fn describe(&self, out: &mut String, id: u8) {
-        let e = &self.eeprom;
-        let r = &self.ram; // from 0x28
-        let _ = writeln!(out, "[servo.M{id}]");
-        let _ = writeln!(out, "model = {}", self.u16(0x00));
-        let _ = writeln!(out, "firmware = {}", e[0x02]);
-        let _ = writeln!(out, "min_angle_limit = {}", self.u16(0x09));
-        let _ = writeln!(out, "max_angle_limit = {}", self.u16(0x0B));
-        let _ = writeln!(out, "max_torque = {}  # 0.1% units", self.u16(0x10));
-        let _ = writeln!(out, "p_coef = {}", e[0x15]);
-        let _ = writeln!(out, "d_coef = {}", e[0x16]);
-        let _ = writeln!(out, "i_coef = {}", e[0x17]);
-        let _ = writeln!(out, "min_startup_force = {}", self.u16(0x18));
-        let _ = writeln!(out, "cw_dead_zone = {}", e[0x1A]);
-        let _ = writeln!(out, "ccw_dead_zone = {}", e[0x1B]);
-        let _ = writeln!(out, "protection_current = {}", self.u16(0x1C));
-        let _ = writeln!(out, "offset = {}", self.u16(0x1F));
-        let _ = writeln!(out, "mode = {}", e[0x21]);
-        let _ = writeln!(out, "overload_torque = {}", e[0x24]);
-        let _ = writeln!(out, "torque_enable = {}", r[0]);
-        let _ = writeln!(out, "acc = {}", r[1]);
-        let _ = writeln!(out, "goal_speed = {}", u16::from_le_bytes([r[6], r[7]]));
-        let _ = writeln!(out, "torque_limit = {}", u16::from_le_bytes([r[8], r[9]]));
-        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
-        let _ = writeln!(out, "eeprom_hex = \"{}\"", hex(e));
-        let _ = writeln!(out, "ram_0x28_hex = \"{}\"\n", hex(r));
-    }
-}
-
-async fn read_servo_info(bus: &mut Bus, id: u8) -> Result<ServoInfo> {
-    let eeprom = bus.read_bytes(id, 0x00, 0x28).await?.to_vec();
-    let ram = bus.read_bytes(id, 0x28, 10).await?.to_vec();
-    Ok(ServoInfo { eeprom, ram })
-}
-
-// ---------------------------------------------------------------------------------------------------------------
-
-async fn move_all(bus: &mut Bus, from: [u16; 7], to: [u16; 7], secs: f64) -> Result<()> {
-    let t0 = Instant::now();
-    let mut tick = tokio::time::interval(Duration::from_millis(20));
-    loop {
-        tick.tick().await;
-        let s = min_jerk(t0.elapsed().as_secs_f64() / secs.max(0.05));
-        let goals: Vec<(u8, u16)> = (0..7)
-            .map(|j| (j as u8 + 1, (from[j] as f64 + (to[j] as f64 - from[j] as f64) * s).round() as u16))
-            .collect();
-        bus.sync_write_goals(&goals).await?;
-        if s >= 1.0 {
-            return Ok(());
-        }
-    }
-}
-
-/// Smoothly bring one joint from `from` to `to`.
-async fn move_joint(bus: &mut Bus, id: u8, from: u16, to: u16, secs: f64) -> Result<()> {
-    let t0 = Instant::now();
-    let mut tick = tokio::time::interval(Duration::from_millis(20));
-    loop {
-        tick.tick().await;
-        let s = min_jerk(t0.elapsed().as_secs_f64() / secs.max(0.05));
-        let g = (from as f64 + (to as f64 - from as f64) * s).round() as u16;
-        bus.sync_write_goals(&[(id, g)]).await?;
-        if s >= 1.0 {
-            return Ok(());
-        }
-    }
-}
-
-/// Runs the plan on one joint. Returns the samples, and Some(reason) if it stopped early.
-#[allow(clippy::too_many_arguments)]
-async fn run_joint(
-    bus: &mut Bus,
-    id: u8,
-    base: u16,
-    base7: &[u16; 7],
-    sc: &safety::SafetyConfig,
-    segs: &[Segment],
-    stop: &AtomicBool,
-    csv: &mut impl std::io::Write,
-) -> Result<(Vec<Sample>, Option<String>)> {
-    writeln!(csv, "t,segment,test,goal,position,speed,load,current_ma,voltage_dv,temp_c")?;
-    let mut samples = Vec::new();
-    let t_start = Instant::now();
-    let mut last_goal = base;
-    let mut overload_since: Option<f64> = None;
-    let mut read_errors = 0;
-    for (si, seg) in segs.iter().enumerate() {
-        let t0 = Instant::now();
-        loop {
-            if stop.load(Ordering::Relaxed) {
-                return Ok((samples, Some("Ctrl-C".into())));
-            }
-            let ts = t0.elapsed().as_secs_f64();
-            if ts >= seg.dur {
-                break;
-            }
-            let goal = (base as f64 + seg.offset(ts)).round().clamp(0.0, 4095.0) as u16;
-            if goal != last_goal {
-                bus.sync_write_goals(&[(id, goal)]).await?;
-                last_goal = goal;
-            }
-            let st = match bus.read_state(id).await {
-                Ok(s) => {
-                    read_errors = 0;
-                    s
-                }
-                Err(e) => {
-                    read_errors += 1;
-                    if read_errors >= 5 {
-                        return Ok((samples, Some(format!("5 failed reads in a row: {e:#}"))));
-                    }
-                    continue;
-                }
-            };
-            let t = t_start.elapsed().as_secs_f64();
-            writeln!(
-                csv,
-                "{t:.5},{},{:?},{goal},{},{},{},{:.1},{},{}",
-                seg.name, seg.test, st.position, st.speed, st.load, st.current_ma, st.voltage_dv, st.temperature_c
-            )?;
-            // Safety: sustained high load (blocked joint) or the joint far from its goal (collision, slip).
-            if (st.load as i32).abs() >= 900 {
-                let since = *overload_since.get_or_insert(t);
-                if t - since > 0.3 {
-                    return Ok((samples, Some(format!("load {} for 0.3 s in {}", st.load, seg.name))));
-                }
-            } else {
-                overload_since = None;
-            }
-            // Safety area: the measured pose must stay clear of the table.
-            let mut pose = *base7;
-            pose[id as usize - 1] = st.position;
-            if let Some(c) = safety::clearance(sc, &pose) {
-                if c < sc.margin_m {
-                    return Ok((samples, Some(format!("clearance {:.0} mm below the {:.0} mm margin in {}", c * 1e3, sc.margin_m * 1e3, seg.name))));
-                }
-            }
-            if (st.position as i32 - goal as i32).abs() > 300 {
-                return Ok((samples, Some(format!("position {} is >300 ticks from goal {goal} in {}", st.position, seg.name))));
-            }
-            samples.push(Sample { t, seg: si, goal, st });
-        }
-    }
-    Ok((samples, None))
-}
-
-fn summarize(id: u8, segs: &[Segment], samples: &[Sample], out: &mut String) {
-    let dur = samples.last().map_or(0.0, |s| s.t) - samples.first().map_or(0.0, |s| s.t);
-    let rate = samples.len() as f64 / dur.max(1e-9);
-    let _ = writeln!(out, "[summary.M{id}]\nsamples = {}\nrate_hz = {rate:.0}", samples.len());
-    println!("\nM{id}: {} samples, {rate:.0} Hz", samples.len());
-
-    let of = |si: usize| -> Vec<&Sample> { samples.iter().filter(|s| s.seg == si).collect() };
-    // Hold: static load.
-    if let Some(hi) = segs.iter().position(|s| s.test == Test::Hold) {
-        let h = of(hi);
-        if !h.is_empty() {
-            let n = h.len() as f64;
-            let load = h.iter().map(|s| s.st.load as f64).sum::<f64>() / n;
-            let cur = h.iter().map(|s| s.st.current_ma).sum::<f64>() / n;
-            let err = h.iter().map(|s| s.goal as f64 - s.st.position as f64).sum::<f64>() / n;
-            println!("  hold: load {load:.0} (0.1%), current {cur:.0} mA, goal-present {err:+.1} ticks");
-            let _ = writeln!(out, "hold_load = {load:.1}\nhold_current_ma = {cur:.1}\nhold_goal_minus_present = {err:.2}");
-        }
-    }
-    // Steps.
-    let mut rows = Vec::new();
-    let mut prev_target = 0.0;
-    for (si, seg) in segs.iter().enumerate() {
-        if let Shape::Step { to } = seg.shape {
-            let s: Vec<Sample> = of(si).into_iter().map(|x| Sample { t: x.t, seg: x.seg, goal: x.goal, st: x.st }).collect();
-            if let Some(st) = step_stats(&s, prev_target, to) {
-                println!(
-                    "  {:<14} dead {:>5.0} ms  t63 {:>5.0} ms  overshoot {:>4.0}%  steady err {:+5.1} ticks",
-                    seg.name, st.dead_ms, st.t63_ms, st.overshoot_pct, st.steady_err
-                );
-                rows.push(format!(
-                    "{{ segment = \"{}\", amp = {}, dead_ms = {:.1}, t63_ms = {:.1}, overshoot_pct = {:.1}, steady_err = {:.2} }}",
-                    seg.name, st.amp, st.dead_ms, st.t63_ms, st.overshoot_pct, st.steady_err
-                ));
-            }
-            prev_target = to;
-        }
-    }
-    if !rows.is_empty() {
-        let _ = writeln!(out, "steps = [\n  {}\n]", rows.join(",\n  "));
-    }
-    // Reversals: slop at the top (turning down) and at the bottom (turning up).
-    let mut slops = Vec::new();
-    for (si, seg) in segs.iter().enumerate() {
-        if seg.test != Test::Reversals {
-            continue;
-        }
-        let dir = match seg.shape {
-            Shape::Ramp { from, to } if from > 0.0 && to < 0.0 => -1.0,
-            Shape::Ramp { from, to } if from < 0.0 && to >= 0.0 => 1.0,
-            _ => continue,
-        };
-        let s: Vec<Sample> = of(si).into_iter().map(|x| Sample { t: x.t, seg: x.seg, goal: x.goal, st: x.st }).collect();
-        if let Some(sl) = reversal_slop(&s, dir) {
-            slops.push(sl);
-            println!("  {:<14} slop {:>4.1} ticks", seg.name, sl);
-        }
-    }
-    if !slops.is_empty() {
-        let mean = slops.iter().sum::<f64>() / slops.len() as f64;
-        println!("  slop mean {mean:.1} ticks");
-        let _ = writeln!(out, "reversal_slop_ticks = {slops:?}\nreversal_slop_mean = {mean:.2}");
-    }
-    // Ramp: peak current while creeping (friction + gravity).
-    let ramp: Vec<&Sample> = samples.iter().filter(|s| segs[s.seg].test == Test::Ramp).collect();
-    if !ramp.is_empty() {
-        let peak = ramp.iter().map(|s| s.st.current_ma).fold(0.0, f64::max);
-        let lag = ramp.iter().map(|s| (s.goal as f64 - s.st.position as f64).abs()).fold(0.0, f64::max);
-        println!("  ramp: peak current {peak:.0} mA, max |goal-present| {lag:.0} ticks");
-        let _ = writeln!(out, "ramp_peak_current_ma = {peak:.1}\nramp_max_goal_minus_present = {lag:.1}");
-    }
-    let _ = writeln!(out);
-}
-
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let cli = Cli::parse();
     let cfg = Settings::load(Some(&cli.config), cli.port.clone())?;
     let mut sc = load_safety(&cli.safety)?;
+    let opts = SessionOpts {
+        joints: cli.joints.clone(),
+        tests: cli.tests.clone(),
+        max_amp: cli.max_amp.min(200) as f64,
+        acc: cli.acc,
+        base: cli.base,
+        payload: cli.payload.clone(),
+        out: cli.out.clone(),
+        grip: cfg.grip,
+        level: cfg.level,
+        port: cfg.port.clone(),
+    };
+    let line_mode = cli.cli || cli.dry_run || cli.set_table_z_mm.is_some() || cli.show_clearance;
+    if !line_mode {
+        // Full-screen app (default). Log lines would tear it, so no logger here.
+        return tui::run(cfg, sc, cli.safety.clone(), opts, cli.sim).await;
+    }
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
     if let Some(z) = cli.set_table_z_mm {
         sc.table_z_m = Some(z / 1e3);
         std::fs::write(&cli.safety, toml::to_string_pretty(&sc)?)?;
@@ -528,7 +127,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     if cli.show_clearance {
-        let mut bus = Bus::open(&cfg.port, cfg.timeout_ms)?;
+        let mut bus = bus::Bus::open(&cfg.port, cfg.timeout_ms)?;
         let p = bus.read_positions(&[1, 2, 3, 4, 5, 6, 7]).await?;
         let q = sc.angles(&p);
         let (joints, r, g) = safety::fk(&q);
@@ -547,126 +146,42 @@ async fn main() -> Result<()> {
         }
         return Ok(());
     }
-    for &j in &cli.joints {
-        if !(1..=7).contains(&j) {
-            bail!("joints must be 1-7 (M8, the gripper, is never excited)");
-        }
-    }
-    let max_amp = cli.max_amp.min(200) as f64;
-    let segs = plan(&cli.tests, max_amp);
+
+    let segs = session::plan(&opts.tests, opts.max_amp);
     let per_joint: f64 = segs.iter().map(|s| s.dur).sum::<f64>() + 2.0;
     println!(
         "plan: {} segments, {:.0} s per joint, {} joint(s) (M{}) -> about {:.1} min; max excursion {} ticks ({:.1} deg); acc {}; payload '{}'",
         segs.len(),
         per_joint,
-        cli.joints.len(),
-        cli.joints.iter().map(|j| j.to_string()).collect::<Vec<_>>().join(", M"),
-        per_joint * cli.joints.len() as f64 / 60.0,
-        max_amp,
-        max_amp * 360.0 / 4096.0,
-        cli.acc,
-        cli.payload
+        opts.joints.len(),
+        opts.joints.iter().map(|j| j.to_string()).collect::<Vec<_>>().join(", M"),
+        per_joint * opts.joints.len() as f64 / 60.0,
+        opts.max_amp,
+        opts.max_amp * 360.0 / 4096.0,
+        opts.acc,
+        opts.payload
     );
     for s in &segs {
         println!("  {:<10?} {:<16} {:>5.1} s", s.test, s.name, s.dur);
     }
-    let reach = plan_reach(&segs);
+    let reach = session::plan_reach(&segs);
     if cli.dry_run {
-        // Clearance against the level pose (or say why not); nothing is opened or moved.
-        match (cli.base, cfg.level) {
-            (Base::Level, Some(l)) | (Base::Current, Some(l)) => {
-                let mut b = [0u16; 7];
-                b.copy_from_slice(&l[..7]);
-                if cli.base == Base::Current {
+        match opts.level7() {
+            Some(b) => {
+                if opts.base == Base::Current {
                     println!("(dry run: clearance shown for the level pose; the real run checks the actual pose)");
                 }
-                clearance_report(&sc, &b, &cli.joints, reach);
+                let rows = session::clearance_rows(&sc, &b, &opts.joints, reach);
+                for l in session::clearance_lines(&sc, &b, &rows, reach) {
+                    println!("{l}");
+                }
             }
-            _ => println!("(dry run: no level pose in the config, clearance is checked at the start of the real run)"),
+            None => println!("(dry run: no level pose in the config, clearance is checked at the start of the real run)"),
         }
         return Ok(());
     }
-    if sc.table_z_m.is_none() {
-        bail!("table height not set: measure it and run with --set-table-z-mm <mm> first (see README, safety area)");
-    }
 
-    let mut bus = Bus::open(&cfg.port, cfg.timeout_ms)?;
-    let missing: Vec<u8> = {
-        let mut m = Vec::new();
-        for id in 1..=8u8 {
-            if !bus.ping(id).await {
-                m.push(id);
-            }
-        }
-        m
-    };
-    if !missing.is_empty() {
-        bail!("servo(s) {missing:?} do not answer on {}: wrong port, or arm not powered", cfg.port);
-    }
-    // Read-only first: check the safety area before anything is written to the servos.
-    let peek = bus.read_positions(&[1, 2, 3, 4, 5, 6, 7]).await?;
-    let mut peek7 = [0u16; 7];
-    peek7.copy_from_slice(&peek);
-    let check_base = match (cli.base, cfg.level) {
-        (Base::Level, Some(l)) => {
-            let mut b = [0u16; 7];
-            b.copy_from_slice(&l[..7]);
-            b
-        }
-        _ => peek7,
-    };
-    let bad = clearance_report(&sc, &check_base, &cli.joints, reach);
-    if !bad.is_empty() {
-        bail!(
-            "refusing to move: {} would come within {:.0} mm of the table. Use a smaller --max-amp, other joints, or another base pose.",
-            bad.iter().map(|(j, a)| format!("M{j} (safe ≤ {a:.0} ticks)")).collect::<Vec<_>>().join(", "),
-            sc.margin_m * 1e3
-        );
-    }
-    if check_base != peek7 {
-        // The move to the base pose must stay clear too (linear in joint space, as move_all does).
-        let worst = (0..=40)
-            .map(|i| {
-                let s = i as f64 / 40.0;
-                let mut p = [0u16; 7];
-                for j in 0..7 {
-                    p[j] = (peek7[j] as f64 + (check_base[j] as f64 - peek7[j] as f64) * s).round() as u16;
-                }
-                safety::clearance(&sc, &p).unwrap_or(f64::NEG_INFINITY)
-            })
-            .fold(f64::INFINITY, f64::min);
-        if worst < sc.margin_m {
-            bail!("refusing to move: the way to the base pose comes within {:.0} mm of the table", worst * 1e3);
-        }
-    }
-    let present = bus.hold_present(cfg.grip).await?;
-    let mut now7 = [0u16; 7];
-    now7.copy_from_slice(&present[..7]);
-    let base7 = match cli.base {
-        Base::Current => now7,
-        Base::Level => {
-            let l = cfg.level()?;
-            let mut b = [0u16; 7];
-            b.copy_from_slice(&l[..7]);
-            b
-        }
-    };
-    println!("present {:?}\nbase    {:?}", &present[..7], base7);
-    if !cli.yes {
-        print!("The listed joints will move up to {max_amp} ticks around the base, one at a time. Start? [y/N] ");
-        std::io::stdout().flush()?;
-        let mut l = String::new();
-        std::io::stdin().read_line(&mut l)?;
-        if !l.trim().eq_ignore_ascii_case("y") {
-            println!("aborted");
-            return Ok(());
-        }
-    }
-    if base7 != now7 {
-        println!("moving to base...");
-        move_all(&mut bus, now7, base7, 3.0).await?;
-    }
-
+    let mut bus = bus::Bus::open(&cfg.port, cfg.timeout_ms)?;
     let stop = Arc::new(AtomicBool::new(false));
     {
         let stop = stop.clone();
@@ -676,119 +191,28 @@ async fn main() -> Result<()> {
             }
         });
     }
-
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-    let dir = cli.out.join(format!("{stamp}_{}", cli.payload.replace(['/', ' '], "_")));
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let mut meta = String::new();
-    let _ = writeln!(meta, "# elrobot-sysid run\nstamp = {stamp}\npayload = \"{}\"\nport = \"{}\"", cli.payload, cfg.port);
-    let _ = writeln!(meta, "base_ticks = {:?}\npresent_at_start = {:?}\nmax_amp_ticks = {max_amp}\nacc = {}", base7, present, cli.acc);
-    let _ = writeln!(meta, "joints = {:?}\ntests = {:?}\ngrip = {:?}\n", cli.joints, cli.tests, cfg.grip);
-    let _ = writeln!(meta, "[safety]\ntable_z_m = {:?}\nmargin_m = {}\ntool_spheres = {:?}\n", sc.table_z_m, sc.margin_m, sc.tool_spheres);
-
-    // Settings of every servo (the model needs the neighbours too).
-    for id in 1..=8u8 {
-        match read_servo_info(&mut bus, id).await {
-            Ok(info) => info.describe(&mut meta, id),
-            Err(e) => log::warn!("M{id}: could not read settings: {e:#}"),
+    let yes = cli.yes;
+    let max_amp = opts.max_amp;
+    let confirm = |present: &[u16], base: &[u16; 7]| {
+        println!("present {:?}\nbase    {:?}", &present[..7], base);
+        if yes {
+            return true;
         }
-    }
-
-    let mut abort: Option<String> = None;
-    for &id in &cli.joints {
-        let j = id as usize - 1;
-        let base = base7[j];
-        let old_acc = bus.read_bytes(id, RamRegister::Acc.address(), 1).await?[0];
-        bus.sync_write_u8(RamRegister::Acc, &[(id, cli.acc)]).await?;
-        println!("\nM{id}: base {base}, running {:.0} s...", per_joint);
-        let path = dir.join(format!("M{id}.csv"));
-        let mut csv = std::io::BufWriter::new(std::fs::File::create(&path)?);
-        let (samples, reason) = run_joint(&mut bus, id, base, &base7, &sc, &segs, &stop, &mut csv).await?;
-        csv.flush()?;
-        // Back to base, gently, whatever happened.
-        let at = bus.read_state(id).await.map(|s| s.position).unwrap_or(base);
-        move_joint(&mut bus, id, at, base, 0.8).await?;
-        bus.sync_write_u8(RamRegister::Acc, &[(id, old_acc)]).await?;
-        summarize(id, &segs, &samples, &mut meta);
-        if let Some(r) = reason {
-            println!("M{id} stopped early: {r}");
-            let _ = writeln!(meta, "[stopped.M{id}]\nreason = \"{}\"\n", r.replace('"', "'"));
-            abort = Some(r);
-            break;
-        }
-    }
-
-    if base7 != now7 {
-        println!("returning to the start pose...");
-        move_all(&mut bus, base7, now7, 3.0).await?;
-    }
-    std::fs::write(dir.join("meta.toml"), &meta)?;
-    println!("\nlogs: {}", dir.display());
-    if let Some(r) = abort {
-        bail!("stopped early: {r}");
+        print!("The listed joints will move up to {max_amp} ticks around the base, one at a time. Start? [y/N] ");
+        let _ = std::io::stdout().flush();
+        let mut l = String::new();
+        let _ = std::io::stdin().read_line(&mut l);
+        l.trim().eq_ignore_ascii_case("y")
+    };
+    let mut emit = |e: Event| match e {
+        Event::Status(s) => println!("{s}"),
+        Event::JointStart { id, base, .. } => println!("\nM{id}: base {base}, running {per_joint:.0} s..."),
+        Event::JointDone(js) => js.lines().iter().for_each(|l| println!("{l}")),
+        _ => {}
+    };
+    match session::run_session(&mut bus, &opts, &sc, &stop, confirm, &mut emit).await? {
+        Some(dir) => println!("\nlogs: {}", dir.display()),
+        None => println!("aborted"),
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn plan_respects_max_amp() {
-        let segs = plan(&[Test::Steps, Test::Reversals, Test::Ramp, Test::Chirp], 30.0);
-        for s in &segs {
-            for i in 0..=100 {
-                let o = s.offset(s.dur * i as f64 / 100.0);
-                assert!(o.abs() <= 30.0 + 1e-9, "{} gives {o}", s.name);
-            }
-        }
-        assert!(!segs.iter().any(|s| s.name.contains("50")));
-    }
-
-    #[test]
-    fn chirp_fades_in_and_out() {
-        let s = Segment { name: "c".into(), test: Test::Chirp, dur: 25.0, shape: Shape::Chirp { amp: 20.0, f0: 0.2, f1: 4.0 } };
-        assert!(s.offset(0.0).abs() < 1e-9);
-        assert!(s.offset(25.0).abs() < 1e-9);
-        let peak = (0..2500).map(|i| s.offset(i as f64 / 100.0).abs()).fold(0.0, f64::max);
-        assert!(peak > 19.0 && peak <= 20.0);
-    }
-
-    fn mk(points: &[(f64, u16, u16)]) -> Vec<Sample> {
-        points
-            .iter()
-            .map(|&(t, goal, pos)| Sample { t, seg: 0, goal, st: MotorState { position: pos, ..Default::default() } })
-            .collect()
-    }
-
-    #[test]
-    fn step_stats_on_a_first_order_response() {
-        // 50-tick step, 40 ms dead time, then tau = 100 ms.
-        let pts: Vec<(f64, u16, u16)> = (0..200)
-            .map(|i| {
-                let t = i as f64 * 0.005;
-                let x = if t < 0.04 { 0.0 } else { 50.0 * (1.0 - (-(t - 0.04) / 0.1).exp()) };
-                (t, 2050, 2000 + x.round() as u16)
-            })
-            .collect();
-        let s = step_stats(&mk(&pts), 0.0, 50.0).unwrap();
-        assert!((s.dead_ms - 45.0).abs() < 10.0, "{s:?}");
-        assert!((s.t63_ms - 140.0).abs() < 15.0, "{s:?}");
-        assert!(s.overshoot_pct < 1.0);
-    }
-
-    #[test]
-    fn reversal_slop_detects_dead_zone() {
-        // Goal ramps down from 2020 at 1 tick per sample; position stays at 2020 for 8 ticks of goal travel.
-        let pts: Vec<(f64, u16, u16)> = (0..30)
-            .map(|i| {
-                let goal = 2020 - i as u16;
-                let pos = if i < 8 { 2020 } else { 2020 - (i as u16 - 8) };
-                (i as f64 * 0.01, goal, pos)
-            })
-            .collect();
-        let slop = reversal_slop(&mk(&pts), -1.0).unwrap();
-        assert!((slop - 10.0).abs() <= 1.0, "{slop}");
-    }
 }
