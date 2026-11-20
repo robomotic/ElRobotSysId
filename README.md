@@ -95,3 +95,7 @@ Units: position and goal in ticks (4096 per turn); speed in ticks/s (sign-magnit
 4. Slop: MuJoCo has no native backlash in the 3.x API. Add a deadband in the control wrapper with the measured reversal slop
    (check what MuJoCo 4.1 offers first).
 5. Validate by replaying logged goal sequences, from these runs and from PingPongSimBot runs, in sim and comparing positions.
+
+## License
+
+Apache License 2.0, see [LICENSE](LICENSE).
