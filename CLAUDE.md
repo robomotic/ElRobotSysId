@@ -26,6 +26,13 @@ particular), add a workspace safety check (GitHub issue #1):
 - **while running:** stop and return to base if the measured pose comes within the margin;
 - the table height must be measured or taught (e.g. jog the gripper down to just above the table and record it), not guessed.
 
+**Progress on the safety area (2026-11-20):** `src/safety.rs` (FK with URDF positions, tool spheres, sweep clearance,
+safe amplitude) is wired into the CLI (`--set-table-z-mm`, `--show-clearance`, dry-run report, refusal before any servo
+write, path check to the base pose, runtime stop). 3 unit tests. **Open:** the tick→angle convention is unverified. With
+sign −1 / zero 2048 the level pose comes out below the base, so the model refuses everything. Next: derive per-joint
+sign/zero from the station viewer mapping (URDF limits + each motor's calibrated min/max), and check with
+`--show-clearance` and a ruler with the user present.
+
 ## Hardware and access
 - Pi "NormaStation" (Pi 4, Debian 13): `ssh robomotic@normastation.local`. If mDNS fails (Wi-Fi drops), use the LAN IP
   (192.168.68.56 on 2026-11-19; may change). Passwordless sudo works.

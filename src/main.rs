@@ -23,6 +23,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
 mod bus;
+mod safety;
 mod settings;
 
 use bus::{Bus, MotorState};
@@ -85,6 +86,55 @@ struct Cli {
     /// Skip the confirmation prompt.
     #[arg(long)]
     yes: bool,
+    /// Table safety area (issue #1): table height, margin, tool spheres. Created by --set-table-z-mm.
+    #[arg(long, default_value = "sysid_safety.toml")]
+    safety: PathBuf,
+    /// Record the MEASURED height of the table plane in the robot base frame (mm; about 0 if the base stands
+    /// directly on the table, negative if it stands on a plate), then exit. Runs are refused until this is set.
+    #[arg(long, allow_hyphen_values = true)]
+    set_table_z_mm: Option<f64>,
+    /// Read-only: print the modelled height of every joint and tool sphere at the current pose, and the clearance.
+    /// Compare with a ruler to check the model. Nothing is written to the servos.
+    #[arg(long)]
+    show_clearance: bool,
+}
+
+fn load_safety(path: &std::path::Path) -> Result<safety::SafetyConfig> {
+    if !path.exists() {
+        return Ok(safety::SafetyConfig::default());
+    }
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+}
+
+/// Largest |offset| (ticks) the plan reaches.
+fn plan_reach(segs: &[Segment]) -> f64 {
+    segs.iter().map(|s| (0..=200).map(|i| s.offset(s.dur * i as f64 / 200.0).abs()).fold(0.0, f64::max)).fold(0.0, f64::max)
+}
+
+/// Per-joint clearance report; returns the joints that would break the margin, with their safe amplitude.
+fn clearance_report(sc: &safety::SafetyConfig, base: &[u16; 7], joints: &[u8], reach: f64) -> Vec<(u8, f64)> {
+    let mut bad = Vec::new();
+    let Some(t) = sc.table_z_m else {
+        println!("safety: table height NOT SET ({}): runs on the arm are refused. Measure it and use --set-table-z-mm.", "sysid_safety.toml");
+        return joints.iter().map(|&j| (j, 0.0)).collect();
+    };
+    let base_c = safety::clearance(sc, base).unwrap_or(f64::NAN);
+    println!("safety: table at {:.0} mm, margin {:.0} mm; clearance at the base pose {:.0} mm", t * 1e3, sc.margin_m * 1e3, base_c * 1e3);
+    for &j in joints {
+        let c = safety::sweep_clearance(sc, base, j as usize - 1, reach).unwrap_or(f64::NAN);
+        let ok = c >= sc.margin_m;
+        let amp = safety::safe_amp(sc, base, j as usize - 1, reach);
+        println!(
+            "  M{j}: sweeping ±{reach:.0} ticks, lowest clearance {:.0} mm  {}",
+            c * 1e3,
+            if ok { "ok".to_string() } else { format!("TOO CLOSE: largest safe --max-amp {amp:.0}") }
+        );
+        if !ok {
+            bad.push((j, amp));
+        }
+    }
+    bad
 }
 
 /// Minimum-jerk interpolation factor for tau in [0, 1].
@@ -314,10 +364,13 @@ async fn move_joint(bus: &mut Bus, id: u8, from: u16, to: u16, secs: f64) -> Res
 }
 
 /// Runs the plan on one joint. Returns the samples, and Some(reason) if it stopped early.
+#[allow(clippy::too_many_arguments)]
 async fn run_joint(
     bus: &mut Bus,
     id: u8,
     base: u16,
+    base7: &[u16; 7],
+    sc: &safety::SafetyConfig,
     segs: &[Segment],
     stop: &AtomicBool,
     csv: &mut impl std::io::Write,
@@ -370,6 +423,14 @@ async fn run_joint(
                 }
             } else {
                 overload_since = None;
+            }
+            // Safety area: the measured pose must stay clear of the table.
+            let mut pose = *base7;
+            pose[id as usize - 1] = st.position;
+            if let Some(c) = safety::clearance(sc, &pose) {
+                if c < sc.margin_m {
+                    return Ok((samples, Some(format!("clearance {:.0} mm below the {:.0} mm margin in {}", c * 1e3, sc.margin_m * 1e3, seg.name))));
+                }
             }
             if (st.position as i32 - goal as i32).abs() > 300 {
                 return Ok((samples, Some(format!("position {} is >300 ticks from goal {goal} in {}", st.position, seg.name))));
@@ -459,6 +520,33 @@ async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let cli = Cli::parse();
     let cfg = Settings::load(Some(&cli.config), cli.port.clone())?;
+    let mut sc = load_safety(&cli.safety)?;
+    if let Some(z) = cli.set_table_z_mm {
+        sc.table_z_m = Some(z / 1e3);
+        std::fs::write(&cli.safety, toml::to_string_pretty(&sc)?)?;
+        println!("table height {z:.0} mm saved to {} (margin {:.0} mm)", cli.safety.display(), sc.margin_m * 1e3);
+        return Ok(());
+    }
+    if cli.show_clearance {
+        let mut bus = Bus::open(&cfg.port, cfg.timeout_ms)?;
+        let p = bus.read_positions(&[1, 2, 3, 4, 5, 6, 7]).await?;
+        let q = sc.angles(&p);
+        let (joints, r, g) = safety::fk(&q);
+        println!("present {p:?}");
+        for (j, pt) in joints.iter().enumerate() {
+            println!("  M{} joint  z {:>6.0} mm", j + 1, pt.z * 1e3);
+        }
+        for (c, rad) in &sc.tool_spheres {
+            let pt = g + r * nalgebra::Vector3::from(*c);
+            println!("  tool sphere r {:>3.0} mm: centre z {:>6.0} mm, bottom {:>6.0} mm", rad * 1e3, pt.z * 1e3, (pt.z - rad) * 1e3);
+        }
+        println!("  lowest modelled point {:.0} mm", safety::lowest_z(&sc, &q) * 1e3);
+        match safety::clearance(&sc, &p) {
+            Some(c) => println!("  clearance above the table {:.0} mm (margin {:.0} mm)", c * 1e3, sc.margin_m * 1e3),
+            None => println!("  table height not set (--set-table-z-mm)"),
+        }
+        return Ok(());
+    }
     for &j in &cli.joints {
         if !(1..=7).contains(&j) {
             bail!("joints must be 1-7 (M8, the gripper, is never excited)");
@@ -482,8 +570,24 @@ async fn main() -> Result<()> {
     for s in &segs {
         println!("  {:<10?} {:<16} {:>5.1} s", s.test, s.name, s.dur);
     }
+    let reach = plan_reach(&segs);
     if cli.dry_run {
+        // Clearance against the level pose (or say why not); nothing is opened or moved.
+        match (cli.base, cfg.level) {
+            (Base::Level, Some(l)) | (Base::Current, Some(l)) => {
+                let mut b = [0u16; 7];
+                b.copy_from_slice(&l[..7]);
+                if cli.base == Base::Current {
+                    println!("(dry run: clearance shown for the level pose; the real run checks the actual pose)");
+                }
+                clearance_report(&sc, &b, &cli.joints, reach);
+            }
+            _ => println!("(dry run: no level pose in the config, clearance is checked at the start of the real run)"),
+        }
         return Ok(());
+    }
+    if sc.table_z_m.is_none() {
+        bail!("table height not set: measure it and run with --set-table-z-mm <mm> first (see README, safety area)");
     }
 
     let mut bus = Bus::open(&cfg.port, cfg.timeout_ms)?;
@@ -498,6 +602,42 @@ async fn main() -> Result<()> {
     };
     if !missing.is_empty() {
         bail!("servo(s) {missing:?} do not answer on {}: wrong port, or arm not powered", cfg.port);
+    }
+    // Read-only first: check the safety area before anything is written to the servos.
+    let peek = bus.read_positions(&[1, 2, 3, 4, 5, 6, 7]).await?;
+    let mut peek7 = [0u16; 7];
+    peek7.copy_from_slice(&peek);
+    let check_base = match (cli.base, cfg.level) {
+        (Base::Level, Some(l)) => {
+            let mut b = [0u16; 7];
+            b.copy_from_slice(&l[..7]);
+            b
+        }
+        _ => peek7,
+    };
+    let bad = clearance_report(&sc, &check_base, &cli.joints, reach);
+    if !bad.is_empty() {
+        bail!(
+            "refusing to move: {} would come within {:.0} mm of the table. Use a smaller --max-amp, other joints, or another base pose.",
+            bad.iter().map(|(j, a)| format!("M{j} (safe ≤ {a:.0} ticks)")).collect::<Vec<_>>().join(", "),
+            sc.margin_m * 1e3
+        );
+    }
+    if check_base != peek7 {
+        // The move to the base pose must stay clear too (linear in joint space, as move_all does).
+        let worst = (0..=40)
+            .map(|i| {
+                let s = i as f64 / 40.0;
+                let mut p = [0u16; 7];
+                for j in 0..7 {
+                    p[j] = (peek7[j] as f64 + (check_base[j] as f64 - peek7[j] as f64) * s).round() as u16;
+                }
+                safety::clearance(&sc, &p).unwrap_or(f64::NEG_INFINITY)
+            })
+            .fold(f64::INFINITY, f64::min);
+        if worst < sc.margin_m {
+            bail!("refusing to move: the way to the base pose comes within {:.0} mm of the table", worst * 1e3);
+        }
     }
     let present = bus.hold_present(cfg.grip).await?;
     let mut now7 = [0u16; 7];
@@ -544,6 +684,7 @@ async fn main() -> Result<()> {
     let _ = writeln!(meta, "# elrobot-sysid run\nstamp = {stamp}\npayload = \"{}\"\nport = \"{}\"", cli.payload, cfg.port);
     let _ = writeln!(meta, "base_ticks = {:?}\npresent_at_start = {:?}\nmax_amp_ticks = {max_amp}\nacc = {}", base7, present, cli.acc);
     let _ = writeln!(meta, "joints = {:?}\ntests = {:?}\ngrip = {:?}\n", cli.joints, cli.tests, cfg.grip);
+    let _ = writeln!(meta, "[safety]\ntable_z_m = {:?}\nmargin_m = {}\ntool_spheres = {:?}\n", sc.table_z_m, sc.margin_m, sc.tool_spheres);
 
     // Settings of every servo (the model needs the neighbours too).
     for id in 1..=8u8 {
@@ -562,7 +703,7 @@ async fn main() -> Result<()> {
         println!("\nM{id}: base {base}, running {:.0} s...", per_joint);
         let path = dir.join(format!("M{id}.csv"));
         let mut csv = std::io::BufWriter::new(std::fs::File::create(&path)?);
-        let (samples, reason) = run_joint(&mut bus, id, base, &segs, &stop, &mut csv).await?;
+        let (samples, reason) = run_joint(&mut bus, id, base, &base7, &sc, &segs, &stop, &mut csv).await?;
         csv.flush()?;
         // Back to base, gently, whatever happened.
         let at = bus.read_state(id).await.map(|s| s.position).unwrap_or(base);

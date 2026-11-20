@@ -1,3 +1,4 @@
 /target
 /sysid_logs
+/sysid_safety.toml
 __pycache__/

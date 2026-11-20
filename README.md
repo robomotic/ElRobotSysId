@@ -61,6 +61,31 @@ Options:
 | `--tests` | any of `hold,steps,reversals,ramp,chirp` |
 | `--payload` | label for what the arm carries: goes into the folder name and the metadata |
 | `--yes` | skip the confirmation |
+| `--safety sysid_safety.toml` | table height, margin, tool spheres, tick→angle convention |
+| `--set-table-z-mm` | record the measured table height (base frame) and exit |
+| `--show-clearance` | read-only: modelled heights and clearance at the current pose |
+
+## Table safety area (required before any run)
+
+The arm sits on a table and must never hit it ([issue #1](https://github.com/robomotic/ElRobotSysId/issues/1)):
+
+```bash
+$B --show-clearance                 # read-only: modelled height of every joint and tool sphere now; compare with a ruler
+$B --set-table-z-mm 0               # MEASURED table height in the robot base frame (mm); runs are refused until set
+$B --dry-run --base level           # per joint: lowest clearance over the planned sweep, and the largest safe --max-amp
+```
+
+- Forward kinematics with positions (URDF joint origins); the gripper and paddle are modelled as spheres in the
+  gripper frame (`tool_spheres` in `sysid_safety.toml`, conservative by default).
+- Before anything is written to the servos: every joint's full planned sweep (and the move to the base pose) must stay
+  at least `margin_m` (30 mm) above the table, or the run is refused with the largest safe amplitude per joint.
+- While running: the measured pose is checked every sample; below the margin the joint stops and returns to base.
+
+**Status (2026-11-20): the geometry is not verified on the real arm yet.** With the assumed tick→angle convention
+(`sign = -1`, `zero = 2048` for every joint) the model puts the tool *below* the base at the level pose, which can't be
+right, so the check refuses everything (it fails safe). Before the first run: compare `--show-clearance` with a ruler,
+and fix the per-joint `sign`/`zero` in `sysid_safety.toml`. The reference is the station web viewer's mapping, which
+spreads each motor's calibrated tick range over the URDF joint limits.
 
 ## Output
 
