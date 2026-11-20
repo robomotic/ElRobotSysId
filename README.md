@@ -8,6 +8,10 @@ Per-joint system identification of the **ElRobot** follower's Feetech ST3215 ser
 The first real ping-pong runs showed that **the servos dominate the real behaviour**: about 150 ms from goal to position and
 about 1.7° of slop on M6. A simulator without those effects won't transfer in either direction. This tool measures them.
 
+
+**Download:** prebuilt Raspberry Pi 4/5 (aarch64) binaries are on the
+[Releases](https://github.com/robomotic/ElRobotSysId/releases) page (`elrobot-sysid-aarch64-linux` + `.sha256`). They need glibc ≥ 2.34 (Raspberry Pi OS bookworm/trixie, Ubuntu 22.04+)
+and no other libraries. Otherwise, build from source as below.
 ## What it does
 
 It excites **one joint at a time** around a base pose while all other joints hold (the gripper keeps its grip). It logs goal,
