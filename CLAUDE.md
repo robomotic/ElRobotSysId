@@ -73,7 +73,12 @@ sign/zero from the station viewer mapping (URDF limits + each motor's calibrated
 - Feetech encodings: speed and current are sign-magnitude in bit 15; load has its sign in bit 10.
 
 ## Releases
-v0.1.0 (2026-11-20): aarch64 binary built on the Pi, stripped, `.sha256` attached, tag at the built commit.
+All built on the Pi, stripped, `.sha256` attached (asset `elrobot-sysid-aarch64-linux`), tag at the built commit;
+the binary needs glibc ≥ 2.39.
+- v0.1.0 (2026-11-20, `3036410`): line-based CLI with the table safety area.
+- v0.2.0 (2026-11-20, `effa4e0`): full-screen app (Setup/Running/Results), `--sim` simulated servos, `--cli`.
+- v0.2.1 (2026-11-20, `5a35680`, latest): SAFETY STOP (Space), wrist camera always in the safety model, payload
+  defaults to `none`.
 To repeat: on the Pi `bash ~/pp-build.sh` (pulls and builds both repos, log in ~/pp-build.log), then `strip` a copy, run
 `sha256sum`, scp it down, and `gh release create vX.Y.Z --target <full sha> --notes-file ... <binary> <binary>.sha256`.
 Check the minimum glibc with `objdump -T <bin> | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1`.
