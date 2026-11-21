@@ -208,17 +208,25 @@ impl ServoInfo {
         let _ = writeln!(out, "firmware = {}", e[0x02]);
         let _ = writeln!(out, "min_angle_limit = {}", self.u16(0x09));
         let _ = writeln!(out, "max_angle_limit = {}", self.u16(0x0B));
+        // Limits and protection (Feetech STS memory table), for the electrical/thermal model (#2).
+        let _ = writeln!(out, "max_temperature_c = {}", e[0x0D]);
+        let _ = writeln!(out, "max_voltage_dv = {}", e[0x0E]);
+        let _ = writeln!(out, "min_voltage_dv = {}", e[0x0F]);
         let _ = writeln!(out, "max_torque = {}  # 0.1% units", self.u16(0x10));
+        let _ = writeln!(out, "unloading_conditions = 0x{:02x}  # bits: 0 voltage, 2 temperature, 3 current, 5 overload", e[0x13]);
         let _ = writeln!(out, "p_coef = {}", e[0x15]);
         let _ = writeln!(out, "d_coef = {}", e[0x16]);
         let _ = writeln!(out, "i_coef = {}", e[0x17]);
         let _ = writeln!(out, "min_startup_force = {}", self.u16(0x18));
         let _ = writeln!(out, "cw_dead_zone = {}", e[0x1A]);
         let _ = writeln!(out, "ccw_dead_zone = {}", e[0x1B]);
-        let _ = writeln!(out, "protection_current = {}", self.u16(0x1C));
+        let _ = writeln!(out, "protection_current = {}  # 6.5 mA units = {:.0} mA", self.u16(0x1C), self.u16(0x1C) as f64 * 6.5);
         let _ = writeln!(out, "offset = {}", self.u16(0x1F));
         let _ = writeln!(out, "mode = {}", e[0x21]);
-        let _ = writeln!(out, "overload_torque = {}", e[0x24]);
+        let _ = writeln!(out, "protective_torque = {}  # % of max, applied after a protection trips", e[0x22]);
+        let _ = writeln!(out, "protection_time = {}  # 10 ms units, overload before tripping", e[0x23]);
+        let _ = writeln!(out, "overload_torque = {}  # % of max that counts as overload", e[0x24]);
+        let _ = writeln!(out, "overcurrent_protection_time = {}  # 10 ms units", e[0x26]);
         let _ = writeln!(out, "torque_enable = {}", r[0]);
         let _ = writeln!(out, "acc = {}", r[1]);
         let _ = writeln!(out, "goal_speed = {}", u16::from_le_bytes([r[6], r[7]]));
@@ -493,7 +501,7 @@ pub fn summarize(id: u8, segs: &[Segment], samples: &[Sample]) -> JointSummary {
         if !h.is_empty() {
             let n = h.len() as f64;
             js.hold_load = Some(h.iter().map(|s| s.st.load as f64).sum::<f64>() / n);
-            js.hold_current_ma = Some(h.iter().map(|s| s.st.current_ma).sum::<f64>() / n);
+            js.hold_current_ma = Some(h.iter().map(|s| s.st.current_ma.abs()).sum::<f64>() / n);
             js.hold_err = Some(h.iter().map(|s| s.goal as f64 - s.st.position as f64).sum::<f64>() / n);
         }
     }
@@ -521,7 +529,7 @@ pub fn summarize(id: u8, segs: &[Segment], samples: &[Sample]) -> JointSummary {
     }
     let ramp: Vec<&Sample> = samples.iter().filter(|s| segs[s.seg].test == Test::Ramp).collect();
     if !ramp.is_empty() {
-        js.ramp_peak_ma = Some(ramp.iter().map(|s| s.st.current_ma).fold(0.0, f64::max));
+        js.ramp_peak_ma = Some(ramp.iter().map(|s| s.st.current_ma.abs()).fold(0.0, f64::max));
         js.ramp_max_err = Some(ramp.iter().map(|s| (s.goal as f64 - s.st.position as f64).abs()).fold(0.0, f64::max));
     }
     js

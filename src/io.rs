@@ -69,7 +69,15 @@ pub struct SimIo {
     t0: Instant,
     pub delay_s: f64,
     pub tau_s: f64,
+    /// DC motor model for the reported current (#2): `i = (duty·V_bus − Ke·N·ω)/R`. The motion itself still comes
+    /// from the lag model above (not torque-driven); this only makes current, duty, voltage and speed consistent.
+    pub r_ohm: f64,
+    pub ke_n: f64,
+    pub v_bus: f64,
 }
+
+/// ST3215 ticks per output revolution.
+const TICKS_PER_REV: f64 = 4096.0;
 
 impl SimIo {
     pub fn new(start: [u16; 8]) -> Self {
@@ -91,6 +99,9 @@ impl SimIo {
             t0: Instant::now(),
             delay_s: 0.03,
             tau_s: 0.07,
+            r_ohm: 4.4,
+            ke_n: 2.5,
+            v_bus: 12.1,
         }
     }
 
@@ -124,14 +135,17 @@ impl SimIo {
         let j = id as usize - 1;
         self.advance(j);
         let s = &self.joints[j];
-        let load = (s.gravity_load + 25.0 * (s.target - s.pos)).clamp(-1000.0, 1000.0);
+        let load = (s.gravity_load + 25.0 * (s.target - s.pos)).clamp(-1000.0, 1000.0).round();
+        let speed = s.speed.round();
+        let omega = speed * std::f64::consts::TAU / TICKS_PER_REV;
+        let amps = (load / 1000.0 * self.v_bus - self.ke_n * omega) / self.r_ohm;
         MotorState {
             position: s.pos.round().clamp(0.0, 4095.0) as u16,
-            speed: s.speed.round() as i16,
+            speed: speed as i16,
             load: load as i16,
-            voltage_dv: 121,
+            voltage_dv: (self.v_bus * 10.0).round() as u8,
             temperature_c: 30,
-            current_ma: 4.0 + load.abs() * 0.6,
+            current_ma: (amps * 1000.0 / 6.5).round() * 6.5, // the servo's 6.5 mA resolution
         }
     }
 }
@@ -157,8 +171,17 @@ impl Io for SimIo {
         mem[0x00..0x02].copy_from_slice(&777u16.to_le_bytes());
         mem[0x05] = id;
         mem[0x0B..0x0D].copy_from_slice(&4095u16.to_le_bytes());
+        mem[0x0D] = 70; // max temperature, °C
+        mem[0x0E] = 140; // max voltage, 0.1 V
+        mem[0x0F] = 40; // min voltage, 0.1 V
         mem[0x10..0x12].copy_from_slice(&1000u16.to_le_bytes());
+        mem[0x13] = 0x2C; // unload on temperature, current, overload
         mem[0x15] = 16;
+        mem[0x1C..0x1E].copy_from_slice(&500u16.to_le_bytes()); // protection current, 6.5 mA units
+        mem[0x22] = 20; // protective torque, %
+        mem[0x23] = 200; // protection time, 10 ms
+        mem[0x24] = 80; // overload torque, %
+        mem[0x26] = 200; // overcurrent protection time, 10 ms
         mem[0x28] = 1;
         mem[0x29] = self.acc[id as usize - 1];
         mem[0x30..0x32].copy_from_slice(&1000u16.to_le_bytes());
@@ -202,6 +225,25 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(600)).await;
             let p = io.read_state(6).await.unwrap().position as i32;
             assert!((p - (2148 - 10)).abs() <= 2, "settles half a dead zone short of the goal: {p}");
+        });
+    }
+
+    #[test]
+    fn sim_current_follows_the_dc_motor_model() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let mut io = SimIo::new([2048; 8]);
+            io.write_goals(&[(2, 1948)]).await.unwrap();
+            let mut moving = false;
+            for _ in 0..200 {
+                let st = io.read_state(2).await.unwrap();
+                let omega = st.speed as f64 * std::f64::consts::TAU / TICKS_PER_REV;
+                let v = st.load as f64 / 1000.0 * st.voltage_dv as f64 / 10.0;
+                let resid = v - io.r_ohm * st.current_ma / 1000.0 - io.ke_n * omega;
+                assert!(resid.abs() < 0.02, "V = R·i + Ke·N·ω within the current resolution: {resid}");
+                moving |= st.speed != 0 && st.current_ma < 0.0;
+            }
+            assert!(moving, "a downward step gives speed and a signed (negative) current");
         });
     }
 }

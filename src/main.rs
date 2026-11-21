@@ -70,7 +70,8 @@ struct Cli {
     /// Run line-based on the real arm instead of opening the full-screen app.
     #[arg(long)]
     cli: bool,
-    /// Full-screen app with SIMULATED servos: nothing moves, no hardware needed.
+    /// SIMULATED servos: nothing moves, no hardware needed. Opens the full-screen app; with --cli, a line-based run
+    /// (writes the same logs, e.g. to try the fitters).
     #[arg(long)]
     sim: bool,
     /// Skip the confirmation prompt (line-based run).
@@ -147,6 +148,27 @@ async fn main() -> Result<()> {
         match safety::clearance(sc, &p) {
             Some(c) => println!("  clearance above the table {:.0} mm (margin {:.0} mm)", c * 1e3, sc.margin_m * 1e3),
             None => println!("  table height not set (--set-table-z-mm)"),
+        }
+        return Ok(());
+    }
+
+    if cli.sim && !cli.dry_run {
+        // Line-based run on simulated servos: no confirmation, nothing moves.
+        let (mut opts, mut sc) = (opts, sc);
+        if tui::sim_setup(&mut opts, &mut sc) {
+            println!("simulated table: 150 mm below the lowest point of the level pose");
+        }
+        let stop = AtomicU8::new(session::ctl::RUN);
+        let mut io = io::SimIo::new(opts.level.unwrap());
+        let mut emit = |e: Event| match e {
+            Event::Status(s) => println!("{s}"),
+            Event::JointStart { id, base, .. } => println!("\nM{id} (simulated): base {base}"),
+            Event::JointDone(js) => js.lines().iter().for_each(|l| println!("{l}")),
+            _ => {}
+        };
+        match session::run_session(&mut io, &opts, &sc, &stop, |_, _| true, &mut emit).await? {
+            Some(dir) => println!("\nlogs: {}", dir.display()),
+            None => println!("aborted"),
         }
         return Ok(());
     }

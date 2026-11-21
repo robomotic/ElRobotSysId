@@ -24,7 +24,11 @@ RUN/FREEZE/RETURN/LEAVE. A moving joint coasts ~1° (one 30 ms command delay) an
 ## Status (2026-11-20)
 - Written and unit-tested. Built on the Pi earlier (inside `~/paddle-ws`, as a second binary of paddle-balance).
   **Not yet run on the arm.** The user will do the system ID later.
-- No analysis or fitting scripts yet. Next: a Python fitter (per joint: dead time + first-order lag + kp/damping/frictionloss,
+- **Electrical/thermal model (issue #2, 2026-11-21):** current is now signed; meta.toml decodes the protection registers;
+  `--sim` servos have a DC motor model (R 4.4 Ω, Ke·N 2.5 V·s/rad); `--sim --cli` runs headless; `tools/fit_electrical.py`
+  fits `duty·V_bus = R·i + Ke·N·ω` per joint (also tests the supply-current hypothesis `i_meas = |duty|·i`). Open: Kt·η from
+  gravity torques at holds (needs MuJoCo), thermal test, protection + heating in the MuJoCo step loop.
+- Next: a Python fitter (per joint: dead time + first-order lag + kp/damping/frictionloss,
   then a check against the chirp), then the MuJoCo actuator parameters.
 
 ## Requirement: safety area (table) before any further run (user, 2026-11-20)

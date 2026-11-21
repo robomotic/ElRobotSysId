@@ -14,7 +14,7 @@ pub struct MotorState {
     pub load: i16,
     pub voltage_dv: u8,
     pub temperature_c: u8,
-    /// ST3215 current unit is 6.5 mA.
+    /// Signed (sign-magnitude in bit 15, like speed); the ST3215 current unit is 6.5 mA.
     pub current_ma: f64,
 }
 
@@ -88,7 +88,7 @@ impl Bus {
             },
             voltage_dv: u8_at(RamRegister::PresentVoltage.address()),
             temperature_c: u8_at(RamRegister::PresentTemperature.address()),
-            current_ma: (sm16(u16_at(RamRegister::PresentCurrent.address())) as f64).abs() * 6.5,
+            current_ma: sm16(u16_at(RamRegister::PresentCurrent.address())) as f64 * 6.5,
         })
     }
 

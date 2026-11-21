@@ -88,20 +88,23 @@ struct App {
 
 const ROWS: usize = 7 + 5 + 4;
 
+/// Simulated servos: the arm starts at the level pose and, if no table height is set, gets a table well below it
+/// (clearly labelled). Returns true when that made-up table is used.
+pub fn sim_setup(opts: &mut SessionOpts, sc: &mut SafetyConfig) -> bool {
+    opts.level = opts.level.or(Some([2003, 1002, 1942, 3185, 1864, 1892, 2226, 1436]));
+    opts.base = Base::Level;
+    if sc.table_z_m.is_some() {
+        return false;
+    }
+    let l = opts.level7().unwrap();
+    sc.table_z_m = Some(safety::lowest_z(sc, &sc.angles(&l)) - 0.15);
+    true
+}
+
 pub async fn run(cfg: Settings, sc: SafetyConfig, _safety_path: PathBuf, opts: SessionOpts, sim: bool) -> Result<()> {
     let mut opts = opts;
     let mut sc = sc;
-    let mut sim_table = false;
-    if sim {
-        // The simulated arm starts at the level pose; give it a table well below, clearly labelled.
-        opts.level = opts.level.or(Some([2003, 1002, 1942, 3185, 1864, 1892, 2226, 1436]));
-        if sc.table_z_m.is_none() {
-            let l = opts.level7().unwrap();
-            sc.table_z_m = Some(safety::lowest_z(&sc, &sc.angles(&l)) - 0.15);
-            sim_table = true;
-        }
-        opts.base = Base::Level;
-    }
+    let sim_table = sim && sim_setup(&mut opts, &mut sc);
     let mut joints = [false; 7];
     for &j in &opts.joints {
         if (1..=7).contains(&j) {

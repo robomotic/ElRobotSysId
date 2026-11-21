@@ -96,6 +96,7 @@ sudo systemctl stop normacore-station          # this tool needs exclusive use o
 B=target/release/elrobot-sysid
 
 $B --sim                                       # full-screen app, simulated servos: try it anywhere
+$B --sim --cli --joints 2,6                    # same, line-based: writes logs without the arm (e.g. for the fitters)
 $B                                             # full-screen app on the real arm
 $B --dry-run                                   # plan + safety report; nothing moves
 $B --cli --joints 5,6,7                        # line-based run on the wrist (no paddle); asks [y/N] first
@@ -116,7 +117,7 @@ Options:
 | `--tests` | any of `hold,steps,reversals,ramp,chirp` |
 | `--payload` | label for what the arm carries: goes into the folder name and the metadata |
 | `--cli` | line-based run instead of the full-screen app |
-| `--sim` | full-screen app with simulated servos |
+| `--sim` | simulated servos: the full-screen app, or a line-based run with `--cli` |
 | `--yes` | skip the confirmation (line-based run) |
 | `--safety sysid_safety.toml` | table height, margin, tool spheres, tick→angle convention |
 | `--set-table-z-mm` | record the measured table height (base frame) and exit |
@@ -153,15 +154,17 @@ spreads each motor's calibrated tick range over the URDF joint limits.
 `sysid_logs/<unix stamp>_<payload>/`:
 - `meta.toml`:
   - run arguments, base pose and start pose;
-  - the **EEPROM and RAM settings of all 8 servos**: P/D/I coefficients, CW/CCW dead zones, max torque, protection current,
-    offset, acceleration, torque limit, plus raw hex;
+  - the **EEPROM and RAM settings of all 8 servos**: P/D/I coefficients, CW/CCW dead zones, max torque, offset,
+    acceleration, torque limit; the limits and protection settings (temperature, voltage, protection current, protection
+    time, protective and overload torque, unloading conditions); plus raw hex;
   - a **per-joint summary**: hold load and current; for each step, dead time, t63, overshoot and steady error; reversal slop;
     ramp peak current.
 - `M<n>.csv`: one row per bus sample, with columns
   `t, segment, test, goal, position, speed, load, current_ma, voltage_dv, temp_c`.
 
 Units: position and goal in ticks (4096 per turn); speed in ticks/s (sign-magnitude decoded); load in 0.1% of max torque
-(signed); current in mA (6.5 mA per raw unit); voltage in 0.1 V.
+(signed; this is the PWM duty); current in mA (6.5 mA per raw unit, signed since v0.3: older logs have |current|); voltage
+in 0.1 V.
 
 ## Safety
 
@@ -180,7 +183,12 @@ Units: position and goal in ticks (4096 per turn); speed in ticks/s (sign-magnit
 3. `damping` and `armature` (rotor inertia × gear ratio²) from overshoot and chirp; `frictionloss` from the ramp.
 4. Slop: MuJoCo has no native backlash in the 3.x API. Add a deadband in the control wrapper with the measured reversal slop
    (check what MuJoCo 4.1 offers first).
-5. Validate by replaying logged goal sequences, from these runs and from PingPongSimBot runs, in sim and comparing positions.
+5. Electrical and thermal model ([#2](https://github.com/robomotic/ElRobotSysId/issues/2)): a DC motor behind the gearbox,
+   `duty·V_bus = R·i + Ke·N·ω`, as a MuJoCo `general` actuator with `ctrl` = motor voltage, so the simulation gives each
+   joint's current and voltage; then the servo's overload protection and a two-node heating model on top.
+   `tools/fit_electrical.py <session>` fits R and Ke·N per joint and writes `<session>/electrical.toml` (with the protection
+   settings and an MJCF actuator line). On simulated servos it recovers the simulator's R 4.4 Ω and Ke·N 2.5 V·s/rad.
+6. Validate by replaying logged goal sequences, from these runs and from PingPongSimBot runs, in sim and comparing positions.
 
 ## License
 
