@@ -50,16 +50,23 @@ impl Default for SafetyConfig {
         Self {
             table_z_m: None,
             margin_m: 0.03,
-            // The gripper motor, the jaws (~60 mm past the motor), and the wrist camera: the U20CAM on its 27 mm mount
-            // sticks out up to 67 mm from the gripper (STL 24 x 35 x 67 mm), lens ~55 mm off the jaw axis (RoboSim
-            // #73). Its direction in the URDF gripper frame is not registered yet, so it is a sphere of 80 mm around
-            // the gripper motor: covers the camera whichever way it points. Tighten after --show-clearance checks.
-            tool_spheres: vec![([0.0, 0.045, 0.0], 0.04), ([0.0, 0.10, 0.0], 0.05), ([0.0, 0.045, 0.0], 0.08)],
+            // The gripper motor, the jaws (~60 mm past the motor), and the wrist camera (U20CAM on its 27 mm mount), which
+            // sits on TOP of the gripper (+z of the URDF link Gripper_Base_v1_1, the frame `fk` ends in). Camera: RoboSim
+            // RobotSources/accessories/innomaker_u20cam (CAD-registered mount pose, collision boxes for mount, board and
+            // module) spans x -17..20, y 4..39, z 15..82 mm in that frame; the sphere is fitted around those boxes.
+            // Ruler check at level (2026-11-21): gripper motor centre ~114 mm vs model 108, lowest gripper point
+            // ~80 mm vs the spheres' 56 mm (conservative).
+            tool_spheres: vec![([0.0, 0.045, 0.0], 0.04), ([0.0, 0.10, 0.0], 0.05), ([0.0014, 0.0215, 0.0485], 0.042)],
             // The Ø150 mm paddle beyond the jaws; its direction in the gripper frame is not measured, so it is large.
             paddle_spheres: vec![([0.0, 0.17, 0.0], 0.11)],
             with_paddle: false,
-            sign: [-1.0; 7],
-            zero: [2048.0; 7],
+            // From the station viewer mapping, angle = lower + (tick - range_min)/(range_max - range_min)*(upper - lower),
+            // with the URDF limits and the follower's calibrated ranges (5B14033257, PingPongSimBot tools/throw_sim.py),
+            // checked against the real arm at level. Rewritten as sign/zero with the exact 4096 ticks/turn, matching
+            // the viewer at the level pose (the viewer's slope differs by <= 5 %). Not `sign -1, zero 2048`: that is
+            // only right for relative moves and puts the arm under the base.
+            sign: [1.0; 7],
+            zero: [2050.3, 2053.0, 2051.3, 2053.0, 1842.7, 1924.5, 2198.6],
         }
     }
 }

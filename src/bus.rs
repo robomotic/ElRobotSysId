@@ -14,7 +14,8 @@ pub struct MotorState {
     pub load: i16,
     pub voltage_dv: u8,
     pub temperature_c: u8,
-    /// Signed (sign-magnitude in bit 15, like speed); the ST3215 current unit is 6.5 mA.
+    /// Decoded as sign-magnitude (bit 15) like speed, but the ST3215 reports the magnitude only: on the real arm it is
+    /// never negative (wrist run 2026-11-21). Unit 6.5 mA.
     pub current_ma: f64,
 }
 

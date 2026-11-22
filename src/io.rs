@@ -61,8 +61,8 @@ struct SimJoint {
     gravity_load: f64,
 }
 
-/// Simulated ElRobot follower. Parameters follow the first real paddle runs (PingPongSimBot): ~30 ms transport delay,
-/// tau ~70 ms, dead zones of a few ticks (M6 ~20).
+/// Simulated ElRobot follower. Timing from the first real sysid run (wrist M5-M7, 2026-11-21): dead time 70-100 ms,
+/// t63 110-210 ms, so ~80 ms transport delay and tau ~80 ms; dead zones of a few ticks (M6 ~20, measured slop 17).
 pub struct SimIo {
     joints: Vec<SimJoint>,
     acc: [u8; 8],
@@ -97,8 +97,8 @@ impl SimIo {
                 .collect(),
             acc: [0; 8],
             t0: Instant::now(),
-            delay_s: 0.03,
-            tau_s: 0.07,
+            delay_s: 0.08,
+            tau_s: 0.08,
             r_ohm: 4.4,
             ke_n: 2.5,
             v_bus: 12.1,
@@ -135,7 +135,7 @@ impl SimIo {
         let j = id as usize - 1;
         self.advance(j);
         let s = &self.joints[j];
-        let load = (s.gravity_load + 25.0 * (s.target - s.pos)).clamp(-1000.0, 1000.0).round();
+        let load = (s.gravity_load + 25.0 * (s.target - s.pos)).clamp(-500.0, 500.0).round(); // duty cap 50 %
         let speed = s.speed.round();
         let omega = speed * std::f64::consts::TAU / TICKS_PER_REV;
         let amps = (load / 1000.0 * self.v_bus - self.ke_n * omega) / self.r_ohm;
@@ -145,7 +145,8 @@ impl SimIo {
             load: load as i16,
             voltage_dv: (self.v_bus * 10.0).round() as u8,
             temperature_c: 30,
-            current_ma: (amps * 1000.0 / 6.5).round() * 6.5, // the servo's 6.5 mA resolution
+            // Like the real ST3215: magnitude only (never negative), 6.5 mA resolution.
+            current_ma: (amps.abs() * 1000.0 / 6.5).round() * 6.5,
         }
     }
 }
@@ -174,7 +175,7 @@ impl Io for SimIo {
         mem[0x0D] = 70; // max temperature, °C
         mem[0x0E] = 140; // max voltage, 0.1 V
         mem[0x0F] = 40; // min voltage, 0.1 V
-        mem[0x10..0x12].copy_from_slice(&1000u16.to_le_bytes());
+        mem[0x10..0x12].copy_from_slice(&500u16.to_le_bytes()); // max torque 50 %, as on the follower
         mem[0x13] = 0x2C; // unload on temperature, current, overload
         mem[0x15] = 16;
         mem[0x1C..0x1E].copy_from_slice(&500u16.to_le_bytes()); // protection current, 6.5 mA units
@@ -184,7 +185,7 @@ impl Io for SimIo {
         mem[0x26] = 200; // overcurrent protection time, 10 ms
         mem[0x28] = 1;
         mem[0x29] = self.acc[id as usize - 1];
-        mem[0x30..0x32].copy_from_slice(&1000u16.to_le_bytes());
+        mem[0x30..0x32].copy_from_slice(&500u16.to_le_bytes()); // torque limit 50 %
         let a = address as usize;
         Ok(mem[a..(a + len as usize).min(mem.len())].to_vec())
     }
@@ -239,11 +240,12 @@ mod tests {
                 let st = io.read_state(2).await.unwrap();
                 let omega = st.speed as f64 * std::f64::consts::TAU / TICKS_PER_REV;
                 let v = st.load as f64 / 1000.0 * st.voltage_dv as f64 / 10.0;
-                let resid = v - io.r_ohm * st.current_ma / 1000.0 - io.ke_n * omega;
-                assert!(resid.abs() < 0.02, "V = R·i + Ke·N·ω within the current resolution: {resid}");
-                moving |= st.speed != 0 && st.current_ma < 0.0;
+                let resid = (v - io.ke_n * omega).abs() - io.r_ohm * st.current_ma / 1000.0;
+                assert!(resid.abs() < 0.02, "|V - Ke·N·ω| = R·|i| within the current resolution: {resid}");
+                assert!(st.current_ma >= 0.0, "the ST3215 reports the current magnitude only");
+                moving |= st.speed != 0 && st.current_ma > 0.0;
             }
-            assert!(moving, "a downward step gives speed and a signed (negative) current");
+            assert!(moving, "a downward step gives speed and current");
         });
     }
 }

@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """Fit the ST3215 electrical model per joint from an elrobot-sysid session (issue #2).
 
-    V_m = duty * V_bus = R * i + (Ke*N) * omega + c
+    V_m = duty * V_bus = R * i + (Ke*N) * omega
 
-duty = Present Load / 1000, V_bus = voltage_dv / 10, omega = output speed in rad/s (4096 ticks per turn), i = the
-signed current in A. c absorbs offsets (brush drop, current-sensor offset) and should come out small.
+duty = Present Load / 1000, V_bus = voltage_dv / 10, omega = output speed in rad/s (4096 ticks per turn), i in A.
+The ST3215 reports the current as a magnitude only (never negative on the real arm), so the fit is
+|V_m - Ke*N*omega| = R*|i|: a 1-D search over Ke*N, with R by least squares at each value.
 
 Also tried: the servo reports the PWM-averaged supply current, i_meas = |duty| * i. Whichever model explains V_m
-better is reported as the preferred one.
+better is reported as the preferred one. Temperature and voltage readings have short glitches (pairs of samples, e.g.
+26 -> 99 degC during motion); they are median-filtered (51 samples).
+
+Needs current: the unloaded wrist draws < 60 mA (< 10 steps of 6.5 mA), too little to identify R and Ke*N. Loaded
+joints (M2-M4 holding against gravity) are needed; the fit is flagged when the current is too small.
 
 Usage:  python3 tools/fit_electrical.py sysid_logs/<stamp>_<payload> [--eta 1.0] [--out electrical.toml]
 
@@ -28,6 +33,9 @@ import numpy as np
 
 TICKS_PER_REV = 4096.0
 MIN_DUTY_B = 0.05  # model B divides by |duty|; skip samples below this
+CURRENT_LSB_A = 0.0065
+MIN_PEAK_A = 0.15  # below this the current has too few levels to fit
+MEDIAN_WINDOW = 51  # samples (~25 ms at 2 kHz); glitches last 1-4 samples and come in clusters
 
 
 def read_meta(path):
@@ -56,55 +64,68 @@ def read_csv(path):
         "t": col("t"),
         "test": np.array([r["test"] for r in rows]),
         "duty": col("load") / 1000.0,
-        "vbus": col("voltage_dv") / 10.0,
+        "vbus": median_filter(col("voltage_dv")) / 10.0,
         "omega": col("speed") * 2.0 * math.pi / TICKS_PER_REV,
-        "i": col("current_ma") / 1000.0,
-        "temp": col("temp_c"),
+        "i": np.abs(col("current_ma")) / 1000.0,
+        "temp": median_filter(col("temp_c")),
+        "temp_raw": col("temp_c"),
     }
 
 
-def ols(X, y):
-    """Least squares with standard errors and R^2."""
-    beta, *_ = np.linalg.lstsq(X, y, rcond=None)
-    resid = y - X @ beta
-    dof = max(len(y) - X.shape[1], 1)
-    s2 = resid @ resid / dof
-    try:
-        se = np.sqrt(np.diag(s2 * np.linalg.inv(X.T @ X)))
-    except np.linalg.LinAlgError:
-        se = np.full(X.shape[1], np.inf)
-    ss = ((y - y.mean()) ** 2).sum()
-    r2 = 1.0 - (resid @ resid) / ss if ss > 0 else float("nan")
-    return beta, se, r2, float(np.sqrt(s2))
+def median_filter(x, w=MEDIAN_WINDOW):
+    if len(x) < w:
+        return x
+    pad = np.pad(x, (w // 2, w // 2), mode="edge")
+    return np.median(np.lib.stride_tricks.sliding_window_view(pad, w), axis=1)
+
+
+def fit_unsigned(v, omega, i_abs):
+    """|v - k*omega| = R*|i|: search k, R by least squares at each k. Returns (R, k, r2, rms)."""
+    def at(k):
+        u = np.abs(v - k * omega)
+        den = i_abs @ i_abs
+        r = (u @ i_abs) / den if den > 0 else float("nan")
+        res = u - r * i_abs
+        return res @ res, r, u
+    ks = np.linspace(-2.0, 10.0, 1201)
+    costs = [at(k)[0] for k in ks]
+    k0 = ks[int(np.argmin(costs))]
+    fine = np.linspace(k0 - 0.02, k0 + 0.02, 81)
+    k = fine[int(np.argmin([at(x)[0] for x in fine]))]
+    sse, r, u = at(k)
+    ss = ((u - u.mean()) ** 2).sum()
+    return r, k, (1.0 - sse / ss if ss > 0 else float("nan")), float(np.sqrt(sse / max(len(u) - 2, 1)))
 
 
 def fit_joint(d):
     v = d["duty"] * d["vbus"]
-    if np.all(d["i"] >= 0) and np.any(d["duty"] < 0):
-        print("    warning: current is never negative while the duty is: an old log with |current|? "
-              "(signed current since #2); the fit will be biased", file=sys.stderr)
     # Same sample set for both models, so their R^2 compare fairly.
     m = np.abs(d["duty"]) >= MIN_DUTY_B
     out = {"samples": int(len(v)), "samples_fit": int(m.sum())}
+    peak = float(d["i"].max())
+    out["max_abs_current_a"] = peak
+    out["current_levels"] = int(len(np.unique(np.round(d["i"][m] / CURRENT_LSB_A))))
+    out["temp_c"] = [float(d["temp"].min()), float(d["temp"].max())]
+    out["temp_glitch_samples"] = int((np.abs(d["temp_raw"] - d["temp"]) >= 3).sum())
+    hold = d["test"] == "Hold"
+    if hold.any():
+        out["hold_current_a"] = float(np.mean(d["i"][hold]))
+        out["hold_duty"] = float(np.mean(d["duty"][hold]))
     if m.sum() < 20 or np.ptp(d["omega"][m]) == 0:
         out["note"] = "not enough motion or duty to fit"
         return out
+    if peak < MIN_PEAK_A:
+        out["note"] = ("too little current to identify R and Ke*N (peak %.0f mA, %d levels of 6.5 mA); "
+                       "needs a loaded joint" % (peak * 1e3, out["current_levels"]))
     for name, i in (("motor_current", d["i"][m]), ("supply_current", d["i"][m] / np.abs(d["duty"][m]))):
-        X = np.column_stack([i, d["omega"][m], np.ones(m.sum())])
-        (r, ken, c), (se_r, se_k, _), r2, rms = ols(X, v[m])
-        out[name] = {"r_ohm": r, "r_se": se_r, "ke_n": ken, "ke_n_se": se_k, "offset_v": c, "r2": r2, "rms_v": rms}
+        r, ken, r2, rms = fit_unsigned(v[m], d["omega"][m], i)
+        out[name] = {"r_ohm": r, "ke_n": ken, "r2": r2, "rms_v": rms}
     out["preferred"] = max(("motor_current", "supply_current"), key=lambda k: out[k]["r2"])
     p = out[out["preferred"]]
     vb = float(np.median(d["vbus"]))
     out["v_bus"] = vb
     out["stall_current_a"] = vb / p["r_ohm"] if p["r_ohm"] > 0 else float("nan")
     out["no_load_speed_rad_s"] = vb / p["ke_n"] if p["ke_n"] > 0 else float("nan")
-    hold = d["test"] == "Hold"
-    if hold.any():
-        out["hold_current_a"] = float(np.mean(d["i"][hold]))
-        out["hold_duty"] = float(np.mean(d["duty"][hold]))
-    out["temp_c"] = [float(d["temp"].min()), float(d["temp"].max())]
-    out["max_abs_current_a"] = float(np.abs(d["i"]).max())
     return out
 
 
@@ -150,22 +171,25 @@ def main():
     csvs = sorted(a.session.glob("M*.csv"), key=lambda p: int(p.stem[1:]))
     if not csvs:
         sys.exit("no M<n>.csv in %s" % a.session)
-    print("%-4s %8s %9s %8s %7s %8s %9s  %s" % ("", "R ohm", "Ke*N", "offs V", "R^2", "rms V", "stall A", "model"))
+    print("%-4s %8s %9s %7s %8s %9s %7s %9s  %s" % ("", "R ohm", "Ke*N", "R^2", "rms V", "stall A", "peak A", "temp C", "model"))
     for p in csvs:
         jid = int(p.stem[1:])
         f = fit_joint(read_csv(p))
         lines.append("[M%d]" % jid)
         if "note" in f:
+            lines.append('note = "%s"' % f["note"])
+        if "preferred" not in f:
             print("M%-3d %s" % (jid, f["note"]))
-            lines += ['note = "%s"' % f["note"], ""]
+            lines.append("")
             continue
         b = f[f["preferred"]]
         other = f["supply_current" if f["preferred"] == "motor_current" else "motor_current"]
-        print("M%-3d %8.3f %9.3f %+8.3f %7.4f %8.4f %9.2f  %s (other model R^2 %.4f)" % (
-            jid, b["r_ohm"], b["ke_n"], b["offset_v"], b["r2"], b["rms_v"], f["stall_current_a"], f["preferred"],
-            other["r2"]))
+        temp = "%.0f-%.0f" % tuple(f["temp_c"])
+        print("M%-3d %8.3f %9.3f %7.4f %8.4f %9.2f %7.3f %9s  %s (other model R^2 %.4f)%s" % (
+            jid, b["r_ohm"], b["ke_n"], b["r2"], b["rms_v"], f["stall_current_a"], f["max_abs_current_a"], temp,
+            f["preferred"], other["r2"], "\n     UNRELIABLE: " + f["note"] if "note" in f else ""))
         for k in ("preferred", "samples", "samples_fit", "v_bus", "stall_current_a", "no_load_speed_rad_s",
-                  "hold_current_a", "hold_duty", "max_abs_current_a", "temp_c"):
+                  "hold_current_a", "hold_duty", "max_abs_current_a", "current_levels", "temp_c", "temp_glitch_samples"):
             if k in f:
                 lines.append("%s = %s" % (k, toml_value(f[k])))
         for model in ("motor_current", "supply_current"):

@@ -135,8 +135,8 @@ $B --dry-run --base level           # per joint: lowest clearance over the plann
 
 - Forward kinematics with positions (URDF joint origins). The gripper (motor, jaws) and the **wrist camera** (always
   mounted: U20CAM on its 27 mm mount, up to 67 mm from the gripper) are modelled as spheres in the gripper frame
-  (`tool_spheres` in `sysid_safety.toml`). The camera's direction in the URDF frame is not registered yet, so its sphere
-  (80 mm around the gripper motor) covers it whichever way it points.
+  (`tool_spheres` in `sysid_safety.toml`). The camera sits on top of the gripper; its 42 mm sphere is fitted around the
+  CAD-registered camera geometry from [RoboSim](https://github.com/spinworks-tech/RoboSim) (`innomaker_u20cam`).
 - The **paddle is not modelled** by default: system identification runs without it. Choose payload `paddle` (or
   `paddle+ball`) and its sphere (`paddle_spheres`) is added.
 - Before anything is written to the servos: every joint's full planned sweep (and the move to the base pose) must stay
@@ -163,8 +163,8 @@ spreads each motor's calibrated tick range over the URDF joint limits.
   `t, segment, test, goal, position, speed, load, current_ma, voltage_dv, temp_c`.
 
 Units: position and goal in ticks (4096 per turn); speed in ticks/s (sign-magnitude decoded); load in 0.1% of max torque
-(signed; this is the PWM duty); current in mA (6.5 mA per raw unit, signed since v0.3: older logs have |current|); voltage
-in 0.1 V.
+(signed; this is the PWM duty); current in mA (6.5 mA per raw unit; the ST3215 reports the magnitude only); voltage in 0.1 V; temperature in °C. Temperature
+and voltage have short glitches (1–4 samples, e.g. 26 → 99 °C during motion): filter them (the fitter uses a median).
 
 ## Safety
 
@@ -187,7 +187,9 @@ in 0.1 V.
    `duty·V_bus = R·i + Ke·N·ω`, as a MuJoCo `general` actuator with `ctrl` = motor voltage, so the simulation gives each
    joint's current and voltage; then the servo's overload protection and a two-node heating model on top.
    `tools/fit_electrical.py <session>` fits R and Ke·N per joint and writes `<session>/electrical.toml` (with the protection
-   settings and an MJCF actuator line). On simulated servos it recovers the simulator's R 4.4 Ω and Ke·N 2.5 V·s/rad.
+   settings and an MJCF actuator line). The current has no sign, so it fits `|duty·V_bus − Ke·N·ω| = R·|i|`. On simulated
+   servos it recovers the simulator's R 4.4 Ω and Ke·N 2.5 V·s/rad. It needs current: the unloaded wrist draws < 60 mA
+   (< 10 steps of 6.5 mA) and is flagged as unreliable; the loaded joints M2–M4 are needed.
 6. Validate by replaying logged goal sequences, from these runs and from PingPongSimBot runs, in sim and comparing positions.
 
 ## License

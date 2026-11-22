@@ -196,6 +196,14 @@ pub struct ServoInfo {
 }
 
 impl ServoInfo {
+    /// The duty the servo can reach, in 0.1 %: the smaller of the EEPROM Max Torque and the RAM Torque Limit.
+    /// The ElRobot follower is set to 500 (50 %), so a blocked joint saturates there, never at 100 %.
+    pub fn duty_cap(&self) -> i32 {
+        let ram = u16::from_le_bytes([self.ram[8], self.ram[9]]) as i32;
+        let cap = (self.u16(0x10) as i32).min(if ram > 0 { ram } else { 1000 });
+        if (1..=1000).contains(&cap) { cap } else { 1000 }
+    }
+
     fn u16(&self, a: usize) -> u16 {
         u16::from_le_bytes([self.eeprom[a], self.eeprom[a + 1]])
     }
@@ -289,6 +297,7 @@ pub async fn run_joint(
     csv: &mut impl std::io::Write,
     emit: &mut impl FnMut(Event),
     total_s: f64,
+    blocked_load: i32,
 ) -> Result<(Vec<Sample>, Option<String>)> {
     writeln!(csv, "t,segment,test,goal,position,speed,load,current_ma,voltage_dv,temp_c")?;
     let mut samples = Vec::new();
@@ -337,8 +346,9 @@ pub async fn run_joint(
                 "{t:.5},{},{:?},{goal},{},{},{},{:.1},{},{}",
                 seg.name, seg.test, st.position, st.speed, st.load, st.current_ma, st.voltage_dv, st.temperature_c
             )?;
-            // Safety: sustained high load (blocked joint) or the joint far from its goal (collision, slip).
-            if (st.load as i32).abs() >= 900 {
+            // Safety: sustained high load (blocked joint) or the joint far from its goal (collision, slip). The load
+            // threshold is 90 % of the servo's duty cap: with the follower's 50 % cap a stall saturates at 500.
+            if (st.load as i32).abs() >= blocked_load {
                 let since = *overload_since.get_or_insert(t);
                 if t - since > 0.3 {
                     return Ok((samples, Some(format!("load {} for 0.3 s in {}", st.load, seg.name))));
@@ -675,9 +685,13 @@ pub async fn run_session<I: Io>(
         sc.with_paddle,
         sc.spheres().collect::<Vec<_>>()
     );
+    let mut blocked_load = [900i32; 8];
     for id in 1..=8u8 {
         match read_servo_info(io, id).await {
-            Ok(info) => info.describe(&mut meta, id),
+            Ok(info) => {
+                info.describe(&mut meta, id);
+                blocked_load[id as usize - 1] = info.duty_cap() * 9 / 10;
+            }
             Err(e) => emit(Event::Status(format!("M{id}: could not read settings: {e:#}"))),
         }
     }
@@ -690,7 +704,9 @@ pub async fn run_session<I: Io>(
         io.write_acc(id, o.acc).await?;
         emit(Event::JointStart { id, index, of: o.joints.len(), base });
         let mut csv = std::io::BufWriter::new(std::fs::File::create(dir.join(format!("M{id}.csv")))?);
-        let (samples, reason) = run_joint(io, id, base, &base7, sc, &segs, stop, &mut csv, emit, per_joint).await?;
+        emit(Event::Status(format!("M{id}: blocked-joint stop at |load| >= {} (0.1 %) for 0.3 s", blocked_load[j])));
+        let (samples, reason) =
+            run_joint(io, id, base, &base7, sc, &segs, stop, &mut csv, emit, per_joint, blocked_load[j]).await?;
         csv.flush()?;
         if stop.load(Ordering::Relaxed) == ctl::FREEZE {
             emit(Event::Frozen { id });
@@ -729,6 +745,21 @@ pub async fn run_session<I: Io>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duty_cap_is_the_smaller_of_max_torque_and_torque_limit() {
+        let info = |max: u16, limit: u16| {
+            let mut eeprom = vec![0u8; 0x28];
+            eeprom[0x10..0x12].copy_from_slice(&max.to_le_bytes());
+            let mut ram = vec![0u8; 10];
+            ram[8..10].copy_from_slice(&limit.to_le_bytes());
+            ServoInfo { eeprom, ram }
+        };
+        assert_eq!(info(500, 500).duty_cap(), 500, "the follower: a stall saturates at 50 %");
+        assert_eq!(info(1000, 300).duty_cap(), 300);
+        assert_eq!(info(1000, 0).duty_cap(), 1000, "no RAM limit read: the EEPROM value");
+        assert_eq!(info(0, 0).duty_cap(), 1000, "nonsense: fall back to full scale");
+    }
     use crate::bus::MotorState;
 
     /// SAFETY STOP on simulated servos: the joint freezes where it is and stays there until the user decides;
