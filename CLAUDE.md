@@ -31,6 +31,12 @@ RUN/FREEZE/RETURN/LEAVE. A moving joint coasts ~1° (one 30 ms command delay) an
   session scratchpad only). ~2 kHz sampling, but 79 % of samples repeat (servo refreshes every ~1–2 ms). Dead time 70–100 ms
   outward, 80–145 ms back to base; t63 110–210 ms; slop M5 9, M6 17, M7 9 ticks; M6 stops ~10 ticks short going negative.
   Servo registers: Max Torque 500 (duty cap 50 %), P 16, protection current 500 (3.25 A), overload 25 % for 2 s → 20 %.
+- **Second real run (2026-11-22): M2–M4, ±25 ticks, from M2 1042** (`sysid_logs/1795347460_none`). dead 78/100/108 ms,
+  slop 3.8/17/14.5 ticks, M4 steady miss 20. **Holds read load 0 and 0 mA** on M2–M4: the gearbox holds the static gravity
+  load by friction, so holds cannot give Kt·η (use up/down ramp asymmetry instead). Duty ≈ 0.4 % per tick of error (P 16),
+  so ±25-tick tests reach only ~12 % duty and < 75 mA: too little for the electrical fit; it needs steps of ~100+ ticks
+  (e.g. on a wrist roll joint, where the sweep stays clear). The app stalled 26/77/97 s (UI and run shared one thread; a
+  blocked SSH terminal stops both): fixed, runs and the Pose task now have their own thread (stall test: 9.5 s gap → 4 ms).
 - **Electrical/thermal model (issue #2):** meta.toml decodes the protection registers; `--sim` servos have a DC motor
   model (R 4.4 Ω, Ke·N 2.5 V·s/rad); `--sim --cli` runs headless; `tools/fit_electrical.py` fits
   `|duty·V_bus − Ke·N·ω| = R·|i|` (the ST3215 current is a magnitude: never negative on the arm) and the supply-current

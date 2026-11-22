@@ -225,7 +225,9 @@ impl App {
         let (tx, rx) = unbounded_channel();
         let stop = Arc::new(AtomicU8::new(ctl::RUN));
         let (sc, sim, cfg, stop2) = (self.sc.clone(), self.sim, self.cfg.clone(), stop.clone());
-        tokio::spawn(async move {
+        // On its own OS thread: if the terminal blocks (SSH, text selection), only the drawing stops, never the run
+        // and its safety checks (a shared thread stalled a real run for up to 97 s, 2026-11-22).
+        spawn_worker(async move {
             let etx = tx.clone();
             let mut emit = move |e: Event| {
                 let _ = etx.send(e);
@@ -259,7 +261,7 @@ impl App {
         let (mtx, mrx) = unbounded_channel();
         let (sc, sim, cfg) = (self.sc.clone(), self.sim, self.cfg.clone());
         let start = self.opts.level.unwrap_or([2048; 8]);
-        tokio::spawn(async move {
+        spawn_worker(async move {
             let res = if sim {
                 let mut io = SimIo::new(start);
                 jog::run(&mut io, sc, crx, mtx.clone()).await
@@ -714,7 +716,17 @@ impl App {
         let segs = session::plan(&o.tests, o.max_amp);
         let reach = session::plan_reach(&segs);
         let per_joint: f64 = segs.iter().map(|s| s.dur).sum::<f64>() + 2.0;
-        let base = o.level7();
+        // The pose the run will start from: level, or the current pose (known once the Pose screen has read it;
+        // the run itself always reads it again and checks before anything moves).
+        let base = if o.base == Base::Level || self.sim {
+            o.level7()
+        } else {
+            self.pose.map(|p| {
+                let mut b = [0u16; 7];
+                b.copy_from_slice(&p.present[..7]);
+                b
+            })
+        };
         let sc = o.safety(&self.sc);
         let safety_rows: Vec<Option<session::JointClearance>> = (1..=7u8)
             .map(|id| base.map(|b| session::clearance_rows(&sc, &b, &[id], reach).remove(0)))
@@ -782,8 +794,16 @@ impl App {
             Some(t) => {
                 r.push(Line::from(format!(" table {:.0} mm{}", t * 1e3, if self.sim_table { "  (simulated)" } else { "" })));
                 r.push(Line::from(format!(" margin {:.0} mm", self.sc.margin_m * 1e3)));
-                if let Some(b) = base {
-                    r.push(Line::from(format!(" clearance at base {:.0} mm", safety::clearance(&sc, &b).unwrap_or(f64::NAN) * 1e3)));
+                match base {
+                    Some(b) => r.push(Line::from(format!(
+                        " clearance at base {:.0} mm ({})",
+                        safety::clearance(&sc, &b).unwrap_or(f64::NAN) * 1e3,
+                        if o.base == Base::Level || self.sim { "level" } else { "current, as last read" }
+                    ))),
+                    None => {
+                        r.push(Line::from(Span::styled(" current pose not read yet: press p", Style::new().fg(Color::Yellow))));
+                        r.push(Line::from(" (the run checks it before moving)"));
+                    }
                 }
                 r.push(Line::from(format!(" model: gripper{}", if sc.with_paddle { " + paddle" } else { " (no paddle)" })));
             }
@@ -795,9 +815,8 @@ impl App {
         }
         if !self.sim {
             r.push(Line::from(""));
-            r.push(Line::from(Span::styled(" Safety geometry is not yet verified on", Style::new().fg(Color::Yellow))));
-            r.push(Line::from(Span::styled(" the real arm (issue #1): check with", Style::new().fg(Color::Yellow))));
-            r.push(Line::from(Span::styled(" --show-clearance and a ruler first.", Style::new().fg(Color::Yellow))));
+            r.push(Line::from(Span::styled(" safety model checked against the arm", dim)));
+            r.push(Line::from(Span::styled(" (ruler, viewer) on 2026-11-21, issue #1", dim)));
         }
         r.push(Line::from(""));
         r.push(Line::from(Span::styled(format!(" port {}", self.cfg.port), dim)));
@@ -927,6 +946,14 @@ impl App {
         }
         f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }).block(Block::bordered().title(" result ")), info);
     }
+}
+
+/// Runs `fut` on a dedicated OS thread with its own runtime, so the bus loop never waits for the terminal.
+fn spawn_worker(fut: impl std::future::Future<Output = ()> + Send + 'static) {
+    std::thread::spawn(move || match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt.block_on(fut),
+        Err(e) => eprintln!("worker runtime: {e}"),
+    });
 }
 
 fn popup(f: &mut Frame, text: &str, color: Color) {

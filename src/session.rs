@@ -341,6 +341,11 @@ pub async fn run_joint(
                 }
             };
             let t = t_start.elapsed().as_secs_f64();
+            if let Some(prev) = samples.last().map(|s: &Sample| s.t) {
+                if t - prev > 0.25 {
+                    emit(Event::Status(format!("M{id}: no samples for {:.2} s (in {}): the loop was held up", t - prev, seg.name)));
+                }
+            }
             writeln!(
                 csv,
                 "{t:.5},{},{:?},{goal},{},{},{},{:.1},{},{}",
