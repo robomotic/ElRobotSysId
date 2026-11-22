@@ -22,6 +22,7 @@
 
 mod bus;
 mod io;
+mod jog;
 mod safety;
 mod session;
 mod settings;

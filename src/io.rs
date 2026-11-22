@@ -207,7 +207,14 @@ impl Io for SimIo {
             self.joints[7].pos = g as f64;
             self.joints[7].target = g as f64;
         }
-        Ok((1..=8).map(|id| self.state(id).position).collect())
+        // Like the real bus: goal = present on every joint (a freeze). Goals already on their way are dropped.
+        let present: Vec<u16> = (1..=8).map(|id| self.state(id).position).collect();
+        let now = self.now();
+        for (j, &p) in present.iter().enumerate() {
+            self.joints[j].goals.clear();
+            self.joints[j].goals.push_back((now, p as f64));
+        }
+        Ok(present)
     }
 }
 

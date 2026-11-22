@@ -1,8 +1,10 @@
 //! Full-screen app: choose joints and tests, see the safety report, run, watch goal vs position live, read the
 //! summary. Same keys as PingPongSimBot: ↑↓ select · Space toggle · ←→ change · Enter start · a ARM · ? help · Esc/q.
+//! The Pose screen (p) moves the arm by hand without the station: one joint at a time, or smoothly to level.
 
 use crate::bus::Bus;
 use crate::io::SimIo;
+use crate::jog::{self, JogCmd, JogMsg, JogState};
 use crate::safety::{self, SafetyConfig};
 use crate::session::{self, ctl, Base, Event, JointSummary, SessionOpts, Test};
 use crate::settings::Settings;
@@ -19,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 const NAMES: [&str; 7] = ["base", "shoulder", "elbow", "forearm", "wrist roll", "wrist pitch", "wrist roll"];
 const TESTS: [(Test, &str, &str); 5] = [
@@ -33,12 +35,30 @@ const AMPS: [u16; 6] = [25, 50, 75, 100, 150, 200];
 const ACCS: [u8; 5] = [0, 50, 100, 150, 254];
 const PAYLOADS: [&str; 3] = ["none", "paddle", "paddle+ball"];
 const ARM_TIMEOUT: Duration = Duration::from_secs(30);
-const HELP: [&str; 15] = [
+const POSE_NAMES: [&str; 8] = ["base", "shoulder", "elbow", "forearm", "wrist roll", "wrist pitch", "wrist roll", "gripper"];
+const POSE_STEPS: [i32; 5] = [1, 5, 10, 25, 50];
+const POSE_HELP: [&str; 13] = [
+    "↑ ↓        choose a joint (M1 base … M7 wrist roll, M8 gripper)",
+    "← →        move it by one step (real arm: needs ARMED, a)",
+    "+ / -      bigger / smaller step: 1 · 5 · 10 · 25 · 50 ticks",
+    "l          go smoothly to the level pose from paddle.toml (asks first)",
+    "Space      FREEZE: every joint holds where it is",
+    "Esc / q    back to Setup (the arm keeps holding; the bus is released for the run)",
+    "",
+    "Every step is checked first: inside the joint's calibrated range, and the whole way",
+    "keeps the table margin (needs the measured table height). While moving, the measured",
+    "pose is checked every 30 ms: below the margin, everything freezes.",
+    "4096 ticks = one turn (1 tick ≈ 0.09°). The arm is folded at level: raising M2 alone",
+    "swings the gripper DOWN. Watch the arm while moving it.",
+    "",
+];
+const HELP: [&str; 16] = [
     "↑ ↓        move between joints, tests and settings",
     "Space      tick / untick the joint or test",
     "← →        change the setting (amplitude, acceleration, base pose, payload)",
     "Enter      start (real arm: needs ARMED and a measured table height; asks first)",
     "a          ARM / disarm the real arm (switches itself off after 30 s without a key)",
+    "p          Pose screen: move the arm by hand (no station needed)",
     "Space      while running: SAFETY STOP, freezes the arm where it is (then r = return, q = leave)",
     "Esc        while running: stop gently, the joint returns to base · otherwise quit",
     "Ctrl-C     emergency: freeze where it is, leave it there, quit",
@@ -56,6 +76,7 @@ enum Mode {
     Confirm,
     Running { rx: UnboundedReceiver<Event>, stop: Arc<AtomicU8>, started: Instant, frozen: Option<u8> },
     Done,
+    Pose { tx: UnboundedSender<JogCmd>, rx: UnboundedReceiver<JogMsg>, closing: bool },
 }
 
 struct App {
@@ -84,6 +105,11 @@ struct App {
     summaries: Vec<JointSummary>,
     log: VecDeque<String>,
     result: Option<(Option<PathBuf>, Option<String>)>,
+    // pose screen
+    pose_sel: usize,
+    pose_step_i: usize,
+    pose: Option<JogState>,
+    pose_confirm: bool,
 }
 
 const ROWS: usize = 7 + 5 + 4;
@@ -143,6 +169,10 @@ pub async fn run(cfg: Settings, sc: SafetyConfig, _safety_path: PathBuf, opts: S
         summaries: Vec::new(),
         log: VecDeque::new(),
         result: None,
+        pose_sel: 1,
+        pose_step_i: 1,
+        pose: None,
+        pose_confirm: false,
     };
     let mut terminal = ratatui::init();
     let res = async {
@@ -158,7 +188,7 @@ pub async fn run(cfg: Settings, sc: SafetyConfig, _safety_path: PathBuf, opts: S
                 }
             }
             terminal.draw(|f| app.draw(f))?;
-            if app.quit && !matches!(app.mode, Mode::Running { .. }) {
+            if app.quit && !matches!(app.mode, Mode::Running { .. } | Mode::Pose { .. }) {
                 return Ok::<(), anyhow::Error>(());
             }
         }
@@ -224,7 +254,73 @@ impl App {
         self.msg(if self.sim { "simulated servos: nothing moves" } else { "checking the servos and the safety area..." });
     }
 
+    fn open_pose(&mut self) {
+        let (ctx, crx) = unbounded_channel();
+        let (mtx, mrx) = unbounded_channel();
+        let (sc, sim, cfg) = (self.sc.clone(), self.sim, self.cfg.clone());
+        let start = self.opts.level.unwrap_or([2048; 8]);
+        tokio::spawn(async move {
+            let res = if sim {
+                let mut io = SimIo::new(start);
+                jog::run(&mut io, sc, crx, mtx.clone()).await
+            } else {
+                match Bus::open(&cfg.port, cfg.timeout_ms) {
+                    Ok(mut bus) => jog::run(&mut bus, sc, crx, mtx.clone()).await,
+                    Err(e) => Err(e),
+                }
+            };
+            // The bus is dropped (released) here, before Closed is sent.
+            let _ = mtx.send(JogMsg::Closed(res.err().map(|e| format!("{e:#}"))));
+        });
+        self.log.clear();
+        self.pose = None;
+        self.pose_confirm = false;
+        self.mode = Mode::Pose { tx: ctx, rx: mrx, closing: false };
+        self.msg(if self.sim { "simulated servos: nothing moves" } else { "opening the bus..." });
+    }
+
+    fn close_pose(&mut self) {
+        if let Mode::Pose { tx, closing, .. } = &mut self.mode {
+            if !*closing {
+                let _ = tx.send(JogCmd::Close);
+                *closing = true;
+            }
+        }
+    }
+
+    fn pose_send(&mut self, cmd: JogCmd) {
+        if let Mode::Pose { tx, .. } = &self.mode {
+            let _ = tx.send(cmd);
+        }
+    }
+
+    fn pump_pose(&mut self) {
+        let mut msgs = Vec::new();
+        if let Mode::Pose { rx, .. } = &mut self.mode {
+            while let Ok(m) = rx.try_recv() {
+                msgs.push(m);
+            }
+        }
+        for m in msgs {
+            match m {
+                JogMsg::State(st) => self.pose = Some(st),
+                JogMsg::Info(t) => self.msg(t),
+                JogMsg::Warn(t) => self.msg(format!("⚠ {t}")),
+                JogMsg::Closed(err) => {
+                    if let Some(e) = err {
+                        self.msg(format!("✗ {e}"));
+                    }
+                    self.mode = Mode::Setup;
+                }
+            }
+        }
+    }
+
     fn pump(&mut self) {
+        if matches!(self.mode, Mode::Pose { .. }) {
+            self.pump_pose();
+            return;
+        }
         let mut events = Vec::new();
         if let Mode::Running { rx, .. } = &mut self.mode {
             while let Ok(e) = rx.try_recv() {
@@ -285,6 +381,10 @@ impl App {
             if let Mode::Running { stop, .. } = &self.mode {
                 stop.store(ctl::LEAVE, Ordering::Relaxed);
             }
+            if matches!(self.mode, Mode::Pose { .. }) {
+                self.pose_send(JogCmd::Freeze);
+                self.close_pose();
+            }
             self.quit = true;
             return;
         }
@@ -297,6 +397,13 @@ impl App {
                 return;
             }
         }
+        // FREEZE on the Pose screen has priority too.
+        if matches!(self.mode, Mode::Pose { .. }) && k.code == KeyCode::Char(' ') {
+            self.pose_confirm = false;
+            self.help = false;
+            self.pose_send(JogCmd::Freeze);
+            return;
+        }
         if self.help {
             self.help = false;
             return;
@@ -305,7 +412,12 @@ impl App {
             self.help = true;
             return;
         }
+        if matches!(self.mode, Mode::Pose { .. }) {
+            self.pose_key(k);
+            return;
+        }
         match &self.mode {
+            Mode::Pose { .. } => {}
             Mode::Running { stop, frozen, .. } => {
                 let frozen = frozen.is_some() || stop.load(Ordering::Relaxed) == ctl::FREEZE;
                 match (frozen, k.code) {
@@ -360,6 +472,7 @@ impl App {
                 KeyCode::Char('a') if !self.sim => {
                     self.armed_until = if self.armed() { None } else { Some(Instant::now() + ARM_TIMEOUT) };
                 }
+                KeyCode::Char('p') => self.open_pose(),
                 KeyCode::Enter => {
                     let o = self.current_opts();
                     if o.joints.is_empty() || o.tests.is_empty() {
@@ -378,13 +491,143 @@ impl App {
         }
     }
 
+    fn pose_key(&mut self, k: KeyEvent) {
+        if self.pose_confirm {
+            self.pose_confirm = false;
+            if k.code == KeyCode::Char('y') {
+                match self.opts.level7() {
+                    Some(to) => {
+                        let from = self.pose.map(|p| p.present).unwrap_or_default();
+                        let dist = (0..7).map(|j| (from[j] as i32 - to[j] as i32).abs()).max().unwrap_or(0) as f64;
+                        // ~200 ticks/s (18°/s), at least 2 s.
+                        self.pose_send(JogCmd::GoTo { to, secs: (dist / 200.0).max(2.0), name: "level".into() });
+                    }
+                    None => self.msg("no level pose: start with --config ~/paddle-ws/paddle.toml"),
+                }
+            } else {
+                self.msg("cancelled");
+            }
+            return;
+        }
+        match k.code {
+            KeyCode::Up => self.pose_sel = self.pose_sel.saturating_sub(1),
+            KeyCode::Down => self.pose_sel = (self.pose_sel + 1).min(7),
+            KeyCode::Char('+') | KeyCode::Char('=') => self.pose_step_i = (self.pose_step_i + 1).min(POSE_STEPS.len() - 1),
+            KeyCode::Char('-') | KeyCode::Char('_') => self.pose_step_i = self.pose_step_i.saturating_sub(1),
+            KeyCode::Left | KeyCode::Right => {
+                if !self.armed() {
+                    self.msg("press a to ARM first: this moves the arm");
+                } else if self.pose.is_none() {
+                    self.msg("waiting for the servos");
+                } else {
+                    let d = POSE_STEPS[self.pose_step_i] * if k.code == KeyCode::Right { 1 } else { -1 };
+                    self.pose_send(JogCmd::Nudge { id: self.pose_sel as u8 + 1, delta: d });
+                }
+            }
+            KeyCode::Char('a') if !self.sim => {
+                self.armed_until = if self.armed() { None } else { Some(Instant::now() + ARM_TIMEOUT) };
+            }
+            KeyCode::Char('l') => {
+                if !self.armed() {
+                    self.msg("press a to ARM first: this moves the arm");
+                } else {
+                    self.pose_confirm = true;
+                }
+            }
+            KeyCode::Char('?') => self.help = true,
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.close_pose();
+                self.msg("releasing the bus...");
+            }
+            _ => {}
+        }
+    }
+
+    fn draw_pose(&self, f: &mut Frame, area: Rect) {
+        let [banner, tbl, info] = Layout::vertical([Constraint::Length(3), Constraint::Length(12), Constraint::Min(5)]).areas(area);
+        let clear = self.pose.and_then(|p| p.clearance);
+        let (ctext, ccol) = match (clear, self.sc.table_z_m) {
+            (_, None) => ("table height NOT SET: only the gripper can move".to_string(), Color::Red),
+            (Some(c), _) if c < self.sc.margin_m + 0.01 => (format!("{:.0} mm above the table (margin {:.0})", c * 1e3, self.sc.margin_m * 1e3), Color::Red),
+            (Some(c), _) if c < self.sc.margin_m + 0.03 => (format!("{:.0} mm above the table (margin {:.0})", c * 1e3, self.sc.margin_m * 1e3), Color::Yellow),
+            (Some(c), _) => (format!("{:.0} mm above the table (margin {:.0})", c * 1e3, self.sc.margin_m * 1e3), Color::Green),
+            (None, _) => ("…".into(), Color::Gray),
+        };
+        let moving = self.pose.is_some_and(|p| p.moving);
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(" SPACE = FREEZE ", Style::new().fg(Color::Red).bold()),
+                Span::raw(format!(" · step {} ticks ({:.1}°) · lowest point ", POSE_STEPS[self.pose_step_i], POSE_STEPS[self.pose_step_i] as f64 * 360.0 / 4096.0)),
+                Span::styled(ctext, Style::new().fg(ccol).bold()),
+                Span::raw(if moving { "  · moving" } else { "" }),
+            ]))
+            .block(Block::bordered().border_style(Style::new().fg(Color::Red))),
+            banner,
+        );
+        let rows: Vec<Row> = (0..8)
+            .map(|j| {
+                let (lo, hi) = (self.sc.range_min[j] as i32, self.sc.range_max[j] as i32);
+                let cells = match self.pose {
+                    Some(p) => {
+                        let pr = p.present[j] as i32;
+                        let room = (pr - lo).min(hi - pr);
+                        let pct = 100.0 * (pr - lo) as f64 / (hi - lo).max(1) as f64;
+                        let room_col = if room < 30 { Color::Red } else if room < 100 { Color::Yellow } else { Color::Reset };
+                        let deg = if j < 7 { format!("{:+.1}°", self.sc.tick_to_rad(j, pr as f64).to_degrees()) } else { "".into() };
+                        vec![
+                            Cell::from(format!("{pr}")),
+                            Cell::from(format!("{}", p.goal[j])),
+                            Cell::from(deg),
+                            Cell::from(format!("{lo}–{hi}")),
+                            Cell::from(format!("{pct:.0}%")),
+                            Cell::from(Span::styled(format!("{room}"), Style::new().fg(room_col))),
+                            Cell::from(format!("{}", p.load[j])),
+                            Cell::from(format!("{:.0}", p.current_ma[j])),
+                            Cell::from(format!("{}", p.temp_c[j])),
+                        ]
+                    }
+                    None => vec![Cell::from("…")],
+                };
+                let mut v = vec![Cell::from(format!("{}M{} {}", if j == self.pose_sel { "▶ " } else { "  " }, j + 1, POSE_NAMES[j]))];
+                v.extend(cells);
+                let r = Row::new(v);
+                if j == self.pose_sel { r.style(Style::new().fg(Color::Black).bg(Color::Cyan)) } else { r }
+            })
+            .collect();
+        f.render_widget(
+            Table::new(
+                rows,
+                [
+                    Constraint::Length(18),
+                    Constraint::Length(8),
+                    Constraint::Length(8),
+                    Constraint::Length(9),
+                    Constraint::Length(11),
+                    Constraint::Length(6),
+                    Constraint::Length(7),
+                    Constraint::Length(6),
+                    Constraint::Length(6),
+                    Constraint::Length(5),
+                ],
+            )
+            .header(Row::new(vec!["joint", "present", "goal", "angle", "range", "%", "room", "load", "mA", "°C"]).style(Style::new().fg(Color::Cyan)))
+            .block(Block::bordered().title(" pose (ticks; room = ticks to the nearer end of the calibrated range) ")),
+            tbl,
+        );
+        let log: Vec<Line> = self.log.iter().rev().take(8).rev().map(|m| {
+            let st = if m.starts_with('⚠') || m.starts_with('✗') { Style::new().fg(Color::Yellow) } else { Style::new() };
+            Line::from(Span::styled(format!(" {m}"), st))
+        }).collect();
+        f.render_widget(Paragraph::new(log).block(Block::bordered().title(" status ")), info);
+    }
+
     // -------------------------------------------------------------------------------------------------------------
 
     fn draw(&self, f: &mut Frame) {
         let [head, body, foot] = Layout::vertical([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
         let (title, keys): (&str, Vec<(&str, &str)>) = match self.mode {
             Mode::Setup => {
-                let mut k = vec![("↑↓", "select"), ("Space", "tick"), ("←→", "change"), ("Enter", "start")];
+                let mut k = vec![("↑↓", "select"), ("Space", "tick"), ("←→", "change"), ("Enter", "start"), ("p", "pose")];
                 if !self.sim {
                     k.insert(0, ("a", "arm"));
                 }
@@ -395,6 +638,14 @@ impl App {
             Mode::Running { frozen: Some(_), .. } => ("FROZEN", vec![("r", "return slowly to base"), ("q", "leave it here")]),
             Mode::Running { .. } => ("RUNNING", vec![("Space", "SAFETY STOP (freeze)"), ("Esc", "stop & return to base"), ("?", "help")]),
             Mode::Done => ("RESULTS", vec![("Enter", "new run"), ("q", "quit"), ("?", "help")]),
+            Mode::Pose { .. } => {
+                let mut k = vec![("↑↓", "joint"), ("←→", "move"), ("+/-", "step"), ("l", "level"), ("Space", "FREEZE"), ("Esc", "back")];
+                if !self.sim {
+                    k.insert(0, ("a", "arm"));
+                }
+                k.push(("?", "help"));
+                ("POSE", k)
+            }
         };
         let mut hs = vec![Span::styled(format!(" {title} "), Style::new().fg(Color::Black).bg(Color::Cyan).bold()), Span::raw("  ")];
         if self.sim {
@@ -413,6 +664,7 @@ impl App {
             Mode::Setup | Mode::Confirm => self.draw_setup(f, body),
             Mode::Running { .. } => self.draw_running(f, body),
             Mode::Done => self.draw_done(f, body),
+            Mode::Pose { .. } => self.draw_pose(f, body),
         }
         let mut ks = Vec::new();
         for (k, d) in keys {
@@ -439,13 +691,18 @@ impl App {
                 Color::Yellow,
             );
         }
+        if self.pose_confirm {
+            let to = self.opts.level7().map_or("–".to_string(), |l| format!("{l:?}"));
+            popup(f, &format!("Move smoothly to the level pose {to}? THE ARM WILL MOVE. (y/n)"), Color::Yellow);
+        }
         if self.help {
-            let w = HELP.iter().map(|l| l.chars().count()).max().unwrap_or(20) as u16 + 6;
+            let help: &[&str] = if matches!(self.mode, Mode::Pose { .. }) { &POSE_HELP } else { &HELP };
+            let w = help.iter().map(|l| l.chars().count()).max().unwrap_or(20) as u16 + 6;
             let [a] = Layout::horizontal([Constraint::Length(w)]).flex(Flex::Center).areas(f.area());
-            let [a] = Layout::vertical([Constraint::Length(HELP.len() as u16 + 3)]).flex(Flex::Center).areas(a);
+            let [a] = Layout::vertical([Constraint::Length(help.len() as u16 + 3)]).flex(Flex::Center).areas(a);
             f.render_widget(Clear, a);
             f.render_widget(
-                Paragraph::new(HELP.iter().map(|l| Line::from(format!(" {l}"))).collect::<Vec<_>>())
+                Paragraph::new(help.iter().map(|l| Line::from(format!(" {l}"))).collect::<Vec<_>>())
                     .block(Block::bordered().title(" keys (any key closes) ").border_style(Style::new().fg(Color::Cyan))),
                 a,
             );

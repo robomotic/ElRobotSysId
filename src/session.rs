@@ -390,15 +390,20 @@ pub struct JointClearance {
     pub clearance: Option<f64>,
     pub ok: bool,
     pub safe_amp: f64,
+    /// Ticks from the base to the nearer end of the joint's calibrated range.
+    pub range_room: f64,
 }
 
 pub fn clearance_rows(sc: &SafetyConfig, base: &[u16; 7], joints: &[u8], reach: f64) -> Vec<JointClearance> {
     joints
         .iter()
         .map(|&id| {
-            let c = safety::sweep_clearance(sc, base, id as usize - 1, reach);
-            let ok = c.is_some_and(|c| c >= sc.margin_m);
-            JointClearance { id, clearance: c, ok, safe_amp: if ok { reach } else { safety::safe_amp(sc, base, id as usize - 1, reach) } }
+            let j = id as usize - 1;
+            let c = safety::sweep_clearance(sc, base, j, reach);
+            let room = sc.range_room(j, base[j]);
+            let ok = c.is_some_and(|c| c >= sc.margin_m) && reach <= room;
+            let safe = if ok { reach } else { safety::safe_amp(sc, base, j, reach).min(room.floor()) };
+            JointClearance { id, clearance: c, ok, safe_amp: safe, range_room: room }
         })
         .collect()
 }
@@ -418,7 +423,13 @@ pub fn clearance_lines(sc: &SafetyConfig, base: &[u16; 7], rows: &[JointClearanc
             "  M{}: sweeping ±{reach:.0} ticks, lowest clearance {:.0} mm  {}",
             r.id,
             r.clearance.unwrap_or(f64::NAN) * 1e3,
-            if r.ok { "ok".to_string() } else { format!("TOO CLOSE: largest safe --max-amp {:.0}", r.safe_amp) }
+            if r.ok {
+                "ok".to_string()
+            } else if reach > r.range_room {
+                format!("PAST THE END OF ITS RANGE ({:.0} ticks to spare): largest safe --max-amp {:.0}", r.range_room, r.safe_amp)
+            } else {
+                format!("TOO CLOSE: largest safe --max-amp {:.0}", r.safe_amp)
+            }
         ));
     }
     v
@@ -637,22 +648,13 @@ pub async fn run_session<I: Io>(
     let bad: Vec<&JointClearance> = rows.iter().filter(|r| !r.ok).collect();
     if !bad.is_empty() {
         bail!(
-            "refusing to move: {} would come within {:.0} mm of the table. Use a smaller amplitude, other joints, or another base pose.",
+            "refusing to move: {} would come within {:.0} mm of the table or leave its calibrated range. Use a smaller amplitude, other joints, or another base pose.",
             bad.iter().map(|r| format!("M{} (safe ≤ {:.0} ticks)", r.id, r.safe_amp)).collect::<Vec<_>>().join(", "),
             sc.margin_m * 1e3
         );
     }
     if base7 != peek7 {
-        let worst = (0..=40)
-            .map(|i| {
-                let s = i as f64 / 40.0;
-                let mut p = [0u16; 7];
-                for j in 0..7 {
-                    p[j] = (peek7[j] as f64 + (base7[j] as f64 - peek7[j] as f64) * s).round() as u16;
-                }
-                safety::clearance(sc, &p).unwrap_or(f64::NEG_INFINITY)
-            })
-            .fold(f64::INFINITY, f64::min);
+        let worst = safety::path_clearance(sc, &peek7, &base7).unwrap_or(f64::NEG_INFINITY);
         if worst < sc.margin_m {
             bail!("refusing to move: the way to the base pose comes within {:.0} mm of the table", worst * 1e3);
         }

@@ -8,6 +8,9 @@
 use nalgebra::{Rotation3, Unit, Vector3};
 use serde::{Deserialize, Serialize};
 
+/// The calibrated ranges were set by hand: the taught level pose has M2 at 1002, 2 ticks below its range (1004).
+pub const RANGE_TOL_TICKS: f64 = 5.0;
+
 /// (origin of the fixed link before the joint, origin of the revolute joint, axis), metres, base frame at zero pose.
 /// Fixed joints "Rigid N" precede each revolute joint.
 const CHAIN: [([f64; 3], [f64; 3], [f64; 3]); 7] = [
@@ -43,6 +46,10 @@ pub struct SafetyConfig {
     /// rad = sign * (tick - zero) * 2pi/4096 for M1..M7 (same convention as PingPongSimBot).
     pub sign: [f64; 7],
     pub zero: [f64; 7],
+    /// Calibrated range of M1..M8 in ticks (the station's, follower 5B14033257; the servos' own angle limits are
+    /// 0..4095, so nothing else stops a joint at its mechanical end). Runs and jogging stay inside it.
+    pub range_min: [u16; 8],
+    pub range_max: [u16; 8],
 }
 
 impl Default for SafetyConfig {
@@ -67,6 +74,9 @@ impl Default for SafetyConfig {
             // only right for relative moves and puts the arm under the base.
             sign: [1.0; 7],
             zero: [2050.3, 2053.0, 2051.3, 2053.0, 1842.7, 1924.5, 2198.6],
+            // Station calibration (viewer, 2026-11-21; same as PingPongSimBot tools/throw_sim.py).
+            range_min: [1087, 1004, 935, 900, 141, 1040, 134, 1237],
+            range_max: [3009, 3092, 3161, 3196, 3955, 3056, 3962, 2859],
         }
     }
 }
@@ -82,6 +92,16 @@ impl SafetyConfig {
     }
 
     /// Joint angles of M1..M7 from ticks.
+    /// Is `tick` inside the calibrated range of joint index `j` (0 = M1 … 7 = M8), give or take `RANGE_TOL_TICKS`?
+    pub fn in_range(&self, j: usize, tick: f64) -> bool {
+        tick >= self.range_min[j] as f64 - RANGE_TOL_TICKS && tick <= self.range_max[j] as f64 + RANGE_TOL_TICKS
+    }
+
+    /// Largest excursion (ticks) around `base` that stays inside joint `j`'s calibrated range (with the tolerance).
+    pub fn range_room(&self, j: usize, base: u16) -> f64 {
+        (base as f64 - self.range_min[j] as f64).min(self.range_max[j] as f64 - base as f64).max(-RANGE_TOL_TICKS) + RANGE_TOL_TICKS
+    }
+
     pub fn angles(&self, ticks: &[u16]) -> [f64; 7] {
         let mut q = [0.0; 7];
         for j in 0..7 {
@@ -133,6 +153,21 @@ pub fn sweep_clearance(cfg: &SafetyConfig, base: &[u16; 7], j: usize, amp: f64) 
         off += 2.0;
     }
     Some(worst)
+}
+
+/// Lowest clearance (m) on the straight line (in ticks) from `from` to `to`; None if the table height is unknown.
+pub fn path_clearance(cfg: &SafetyConfig, from: &[u16; 7], to: &[u16; 7]) -> Option<f64> {
+    let n = from.iter().zip(to).map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs()).max().unwrap_or(0).div_ceil(2).max(1);
+    (0..=n)
+        .map(|i| {
+            let s = i as f64 / n as f64;
+            let mut p = [0u16; 7];
+            for j in 0..7 {
+                p[j] = (from[j] as f64 + (to[j] as f64 - from[j] as f64) * s).round() as u16;
+            }
+            clearance(cfg, &p)
+        })
+        .try_fold(f64::INFINITY, |w, c| c.map(|c| w.min(c)))
 }
 
 /// Largest amplitude (ticks, ≤ `wanted`) whose sweep keeps the margin; 0 if even the base pose doesn't.

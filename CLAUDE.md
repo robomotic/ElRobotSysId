@@ -18,6 +18,11 @@ from the real wrist run (80 ms delay, tau 80 ms); the screenshots predate that (
 **Safety additions (user, 2026-11-20):** the paddle is NOT on the arm during sysid (payload defaults to `none`; the
 paddle spheres are added only for payload "paddle…"). The wrist camera IS always on: it's in `tool_spheres` (42 mm
 sphere on top of the gripper, fitted to RoboSim's CAD-registered U20CAM boxes; 27 mm mount, 24×35×67 mm body).
+**Pose screen (2026-11-22, user: "I hate restarting the norma station for just moving the arm"):** `p` in Setup;
+src/jog.rs owns the bus in a task (JogCmd Nudge/GoTo/Freeze/Close → JogMsg State/Info/Warn/Closed). Checks every step:
+calibrated range ± 5 ticks (`SafetyConfig::range_min/max`, `RANGE_TOL_TICKS`; the taught level has M2 at 1002 < 1004)
+and `safety::path_clearance`; runtime freeze below the margin. Runs also refuse sweeps past the range. The arm is
+folded at level: raising M2 alone swings the gripper DOWN (M2 1020 → 57 mm, 1100 → 38, 1200 → 15 mm).
 SAFETY STOP: Space in the app freezes (goal = present, torque on), then r = return slowly, q = leave; `session::ctl`
 RUN/FREEZE/RETURN/LEAVE. A moving joint coasts ~1° (one 30 ms command delay) and settles in its dead zone.
 
