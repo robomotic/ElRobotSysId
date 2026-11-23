@@ -167,6 +167,21 @@ and a ruler. On another arm the geometry carries over, but **check your own tabl
 **your calibrated ranges/zeros** (station viewer, then `--show-clearance` and a ruler) before anything moves. Every field
 is explained in the file.
 
+## Real arm vs simulation: videos
+
+The MuJoCo servo model (`tools/servo_sim.py`) replaying the goals of real sysid runs. The arm is posed with the **real**
+logged joint positions (blue) and the simulation's (orange ghost); the chart below is in true ticks. Motion is drawn ×5
+(both arms, same factor) so differences are visible; the drawn poses are not where the arm went.
+`tools/make_replay_video.py` makes them; statistics in [docs/SERVO_MODEL.md §6](docs/SERVO_MODEL.md#6-how-well-the-model-matches-the-real-arm).
+
+| Video | Run | Parameters | RMS |
+|---|---|---|---|
+| [M2 held out](docs/videos/M2_loaded75_heldout_real_vs_sim.mp4) | shoulder ±75 at the load pose | from the ±50 run | 0.37° |
+| [M3 held out](docs/videos/M3_loaded75_heldout_real_vs_sim.mp4) | elbow ±75 at the load pose | from the ±50 run | 0.35° |
+| [M4 held out](docs/videos/M4_loaded75_heldout_real_vs_sim.mp4) | forearm ±75 at the load pose | from the ±50 run | 0.30° |
+| [M7 held out](docs/videos/M7_heldout_real_vs_sim.mp4) | wrist roll ±150 (front view) | from the ±50 run | 0.36° |
+| [M3 fitted](docs/videos/M3_loaded_real_vs_sim.mp4) | elbow ±50 at the load pose | fitted on this run | 0.39° |
+
 ## Output
 
 `sysid_logs/<unix stamp>_<payload>/`:
