@@ -26,6 +26,7 @@ mod jog;
 mod safety;
 mod session;
 mod settings;
+mod stall;
 mod tui;
 
 use anyhow::{Context, Result};
@@ -93,6 +94,19 @@ struct Cli {
     /// --target 2001,1750,2100,2450,1881,1869,2244
     #[arg(long, value_delimiter = ',')]
     target: Option<Vec<u16>>,
+    /// STALL TEST (issue #2): press a lever on this joint (1-7) into a kitchen scale at offsets 0..max..0 ticks and
+    /// type the scale reading at each level. Line-based; asks [y/N] first. Needs --into and --lever-mm.
+    #[arg(long)]
+    stall: Option<u8>,
+    /// Stall test: +1 or -1, the tick direction that presses the lever into the scale (try it on the Pose screen).
+    #[arg(long, allow_hyphen_values = true)]
+    into: Option<i32>,
+    /// Stall test: lever length from the joint axis to where it touches the scale, mm.
+    #[arg(long)]
+    lever_mm: Option<f64>,
+    /// Stall test: largest offset into the scale, ticks (duty ≈ 0.42 %/tick: 40 → ~17 %).
+    #[arg(long, default_value_t = 40)]
+    stall_max: i32,
 }
 
 pub fn load_safety(path: &std::path::Path) -> Result<safety::SafetyConfig> {
@@ -124,7 +138,7 @@ async fn main() -> Result<()> {
         port: cfg.port.clone(),
         target: cli.target.as_ref().and_then(|t| t.as_slice().try_into().ok()),
     };
-    let line_mode = cli.cli || cli.dry_run || cli.set_table_z_mm.is_some() || cli.show_clearance;
+    let line_mode = cli.cli || cli.dry_run || cli.set_table_z_mm.is_some() || cli.show_clearance || cli.stall.is_some();
     if !line_mode {
         // Full-screen app (default). Log lines would tear it, so no logger here.
         return tui::run(cfg, sc, cli.safety.clone(), opts, cli.sim).await;
@@ -159,6 +173,10 @@ async fn main() -> Result<()> {
             None => println!("  table height not set (--set-table-z-mm)"),
         }
         return Ok(());
+    }
+
+    if let Some(joint) = cli.stall {
+        return run_stall(&cli, &cfg, &sc_run, joint).await;
     }
 
     if cli.sim && !cli.dry_run {
@@ -256,5 +274,75 @@ async fn main() -> Result<()> {
         Some(dir) => println!("\nlogs: {}", dir.display()),
         None => println!("aborted"),
     }
+    Ok(())
+}
+
+async fn run_stall(cli: &Cli, cfg: &Settings, sc: &safety::SafetyConfig, joint: u8) -> Result<()> {
+    let (Some(into), Some(lever_mm)) = (cli.into, cli.lever_mm) else {
+        anyhow::bail!("the stall test needs --into (+1 or -1) and --lever-mm");
+    };
+    let o = stall::StallOpts { joint, into, lever_m: lever_mm / 1e3, max_offset: cli.stall_max };
+    let levels = stall::offsets(o.max_offset);
+    println!(
+        "STALL TEST on M{joint}: lever {lever_mm:.0} mm, pressing toward {} ticks, offsets {:?} (up, then back down).",
+        if into > 0 { "higher" } else { "lower" },
+        levels
+    );
+    println!("Set-up: the lever rests lightly on the scale at the current pose. At each level the joint holds and you");
+    println!("type the scale reading in grams (q aborts). Duty stays under ~{:.0} %; it stops above {:.0} % or if the lever", 0.42 * o.max_offset as f64, stall::MAX_DUTY * 100.0);
+    println!("slips (joint > {} ticks past its goal). The joint returns to its start position at the end.", stall::SLIP_TICKS);
+    let ask_line = |prompt: &str| -> Option<String> {
+        print!("{prompt}");
+        let _ = std::io::stdout().flush();
+        let mut l = String::new();
+        std::io::stdin().read_line(&mut l).ok()?;
+        Some(l.trim().to_string())
+    };
+    if !cli.yes && !ask_line(&format!("M{joint} WILL MOVE (up to {} ticks into the scale). Start? [y/N] ", o.max_offset))
+        .is_some_and(|l| l.eq_ignore_ascii_case("y"))
+    {
+        println!("cancelled");
+        return Ok(());
+    }
+    let ask = |p: &stall::StallPoint| -> Option<f64> {
+        loop {
+            let l = ask_line(&format!("  offset {:>3} ({}): scale reading, grams (q = abort): ", p.offset, if p.up { "up" } else { "down" }))?;
+            if l.eq_ignore_ascii_case("q") {
+                return None;
+            }
+            match l.replace(',', ".").parse::<f64>() {
+                Ok(g) => return Some(g),
+                Err(_) => println!("  a number, please (or q)"),
+            }
+        }
+    };
+    let mut log = |m: String| println!("{m}");
+    let points = if cli.sim {
+        let mut io = io::SimIo::new(cfg.level.unwrap_or([2048; 8]));
+        stall::run(&mut io, sc, &o, ask, &mut log).await?
+    } else {
+        let mut bus = bus::Bus::open(&cfg.port, cfg.timeout_ms)?;
+        stall::run(&mut bus, sc, &o, ask, &mut log).await?
+    };
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    let dir = cli.out.join(format!("{stamp}_stall_M{joint}{}", if cli.sim { "_sim" } else { "" }));
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("stall.csv"), stall::csv(&points))?;
+    let mut summary = format!("joint = {joint}\ninto = {into}\nlever_m = {}\nmax_offset = {}\n", o.lever_m, o.max_offset);
+    match stall::fit(&points) {
+        Some(f) => {
+            println!(
+                "\nM{joint}: Kt*eta*N = {:.2} N m/A (R² {:.3}, {} points), intercept {:+.3} N m, static friction {:.3} N m",
+                f.kt_eta_n, f.r2, f.points, f.intercept_nm, f.friction_nm
+            );
+            summary += &format!(
+                "kt_eta_n_nm_per_a = {:.4}\nr2 = {:.4}\nintercept_nm = {:.4}\nstatic_friction_nm = {:.4}\npoints = {}\n",
+                f.kt_eta_n, f.r2, f.intercept_nm, f.friction_nm, f.points
+            );
+        }
+        None => println!("\nnot enough loaded points to fit"),
+    }
+    std::fs::write(dir.join("stall.toml"), summary)?;
+    println!("logs: {}", dir.display());
     Ok(())
 }

@@ -107,7 +107,8 @@ sudo systemctl stop normacore-station          # this tool needs exclusive use o
 B=target/release/elrobot-sysid
 
 $B --sim                                       # full-screen app, simulated servos: try it anywhere
-$B --sim --cli --joints 2,6                    # same, line-based: writes logs without the arm (e.g. for the fitters)
+$B --sim --cli --joints 3,6                    # same, line-based: writes logs without the arm (e.g. for the fitters)
+$B --stall 6 --into 1 --lever-mm 110           # STALL TEST: press into a kitchen scale, type the readings (asks first)
 $B                                             # full-screen app on the real arm
 $B --dry-run                                   # plan + safety report; nothing moves
 $B --cli --joints 5,6,7                        # line-based run on the wrist (no paddle); asks [y/N] first
@@ -217,7 +218,13 @@ and voltage have short glitches (1–4 samples, e.g. 26 → 99 °C during motion
    `tools/elrobot_model.py` is the shared URDF/tick mapping (contacts off: the URDF meshes overlap by up to 28 mm).
 
    ![M3 replay at the loaded pose: goal, real and MuJoCo position; real and simulated supply current](docs/plots/replay-m3-loaded.png)
-7. Validate by replaying logged goal sequences, from these runs and from PingPongSimBot runs, in sim and comparing positions.
+7. **Stall test** (`--stall <joint> --into ±1 --lever-mm <mm>`, line-based): torque per amp **without the URDF
+   masses** (printed parts make them uncertain). The joint presses a lever (or the fingertips) into a kitchen scale at
+   0 → 5 → 10 → 20 → 30 → 40 → … → 0 ticks; at each level it holds, measures duty and current, and you type the
+   reading in grams. Fit: `torque = Kt·η·N·i_motor + b ∓ friction` (up/down), written to
+   `sysid_logs/<stamp>_stall_M<n>/stall.{csv,toml}`. Checked first: table clearance and range over the sweep; stops
+   above 30 % duty or if the joint runs > 15 ticks past its goal (the lever slipped).
+8. Validate by replaying logged goal sequences, from these runs and from PingPongSimBot runs, in sim and comparing positions.
 
 ## License
 

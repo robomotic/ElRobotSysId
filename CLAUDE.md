@@ -58,11 +58,17 @@ RUN/FREEZE/RETURN/LEAVE. A moving joint coasts ~1° (one 30 ms command delay) an
   Replay fits: M2 4.2, M3 4.5, M4 2.9, M7 4.9 ticks RMS; kp_duty from the log (0.0042/tick M2–M4, 0.0021 M7).
   Friction is load-dependent (0.3 loaded, 0.05 unloaded wrist): next model step. User (2026-11-23): printed parts make
   the URDF masses uncertain → add a stall test against a kitchen scale (torque without masses).
+- **Stall test (2026-11-23):** src/stall.rs + `--stall J --into ±1 --lever-mm L [--stall-max 40]` (line-based, types
+  grams per level; tare at offset 0; fit torque = k·i + b ∓ f by 3-parameter least squares). Not run on the arm yet.
+  SimIo duty slope set to the real 0.42 %/tick (was 2.5).
 - **Electrical/thermal model (issue #2):** meta.toml decodes the protection registers; `--sim` servos have a DC motor
   model (R 4.4 Ω, Ke·N 2.5 V·s/rad); `--sim --cli` runs headless; `tools/fit_electrical.py` fits
   `|duty·V_bus − Ke·N·ω| = R·|i|` (the ST3215 current is a magnitude: never negative on the arm) and the supply-current
   alternative. Temperature/voltage glitch for 1–4 samples (26 → 99 °C): 51-sample median. Wrist currents < 60 mA are too
   small to fit (flagged); needs M2–M4. Open: Kt·η from gravity torques at holds, thermal test, MuJoCo step loop.
+- **BAM calibration (issue #3, 2026-11-23):** a bench pendulum test of one spare ST3215 (D=0 and I=0 in RAM, P sweep, 12 V)
+  for Kt/R/Ke/armature without the URDF masses; friction is refitted per joint on the arm logs. The user is still printing
+  the pendulum: don't write the bench mode until they say so.
 - Elrobot-sysid on the Pi: `~/.local/bin/elrobot-sysid` links to the release build; run it from `~/ElRobotSysId` (it reads
   `sysid_safety.toml` and writes `sysid_logs/` in the current folder).
 - Next: a Python fitter (per joint: dead time + first-order lag + kp/damping/frictionloss,

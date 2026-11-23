@@ -135,7 +135,8 @@ impl SimIo {
         let j = id as usize - 1;
         self.advance(j);
         let s = &self.joints[j];
-        let load = (s.gravity_load + 25.0 * (s.target - s.pos)).clamp(-500.0, 500.0).round(); // duty cap 50 %
+        // Duty from the error: 0.42 %/tick as fitted on the real arm (firmware P 16), capped at 50 %.
+        let load = (s.gravity_load + 4.2 * (s.target - s.pos)).clamp(-500.0, 500.0).round();
         let speed = s.speed.round();
         let omega = speed * std::f64::consts::TAU / TICKS_PER_REV;
         let amps = (load / 1000.0 * self.v_bus - self.ke_n * omega) / self.r_ohm;
