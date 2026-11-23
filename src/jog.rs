@@ -238,6 +238,26 @@ mod tests {
     }
 
     #[test]
+    fn the_load_pose_of_2026_11_23_is_reachable_and_safe() {
+        // Arm half upright, gripper forward: M2/M3/M4 carry 0.31/0.48/0.42 N m of gravity (MuJoCo search).
+        let present = [2001, 1042, 2051, 3160, 1881, 1869, 2244];
+        let load = [2001, 1750, 2100, 2450, 1881, 1869, 2244];
+        let level = [2003, 1002, 1942, 3185, 1864, 1892, 2226];
+        let sc = sc();
+        assert!(check_goto(&sc, &present, &load).is_ok(), "{:?}", check_goto(&sc, &present, &load));
+        assert!(check_goto(&sc, &load, &level).is_ok());
+        assert!(check_goto(&sc, &load, &present).is_ok());
+        assert!(safety::clearance(&sc, &load).unwrap() > 0.085, "about 91 mm up");
+        for j in 1..4 {
+            assert!(safety::sweep_clearance(&sc, &load, j, 50.0).unwrap() > 0.08, "M{} sweep", j + 1);
+        }
+        // Moving M2 alone first would not be: the folded forearm swings into the table.
+        let mut m2_first = present;
+        m2_first[1] = 1750;
+        assert!(check_goto(&sc, &present, &m2_first).is_err());
+    }
+
+    #[test]
     fn goto_checks_range_and_path() {
         let from = seven(&NOW);
         let mut to = from;

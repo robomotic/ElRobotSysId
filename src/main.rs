@@ -89,6 +89,10 @@ struct Cli {
     /// Compare with a ruler to check the model. Nothing is written to the servos.
     #[arg(long)]
     show_clearance: bool,
+    /// A pose for the Pose screen's `g` key (go there smoothly, path checked first): 7 ticks M1..M7, e.g.
+    /// --target 2001,1750,2100,2450,1881,1869,2244
+    #[arg(long, value_delimiter = ',')]
+    target: Option<Vec<u16>>,
 }
 
 pub fn load_safety(path: &std::path::Path) -> Result<safety::SafetyConfig> {
@@ -102,6 +106,9 @@ pub fn load_safety(path: &std::path::Path) -> Result<safety::SafetyConfig> {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(t) = &cli.target {
+        anyhow::ensure!(t.len() == 7, "--target needs 7 ticks (M1..M7, comma-separated), got {}", t.len());
+    }
     let cfg = Settings::load(Some(&cli.config), cli.port.clone())?;
     let mut sc = load_safety(&cli.safety)?;
     let opts = SessionOpts {
@@ -115,6 +122,7 @@ async fn main() -> Result<()> {
         grip: cfg.grip,
         level: cfg.level,
         port: cfg.port.clone(),
+        target: cli.target.as_ref().and_then(|t| t.as_slice().try_into().ok()),
     };
     let line_mode = cli.cli || cli.dry_run || cli.set_table_z_mm.is_some() || cli.show_clearance;
     if !line_mode {

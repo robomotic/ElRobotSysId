@@ -585,6 +585,8 @@ pub struct SessionOpts {
     pub grip: Option<u16>,
     pub level: Option<[u16; 8]>,
     pub port: String,
+    /// A pose (M1-M7 ticks) the Pose screen can go to with `g` (--target).
+    pub target: Option<[u16; 7]>,
 }
 
 impl SessionOpts {
@@ -793,6 +795,7 @@ mod tests {
                 grip: None,
                 level: Some(level),
                 port: "sim".into(),
+                target: None,
             };
             let stop = Arc::new(AtomicU8::new(ctl::RUN));
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

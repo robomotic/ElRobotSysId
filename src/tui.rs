@@ -37,11 +37,12 @@ const PAYLOADS: [&str; 3] = ["none", "paddle", "paddle+ball"];
 const ARM_TIMEOUT: Duration = Duration::from_secs(30);
 const POSE_NAMES: [&str; 8] = ["base", "shoulder", "elbow", "forearm", "wrist roll", "wrist pitch", "wrist roll", "gripper"];
 const POSE_STEPS: [i32; 5] = [1, 5, 10, 25, 50];
-const POSE_HELP: [&str; 13] = [
+const POSE_HELP: [&str; 14] = [
     "↑ ↓        choose a joint (M1 base … M7 wrist roll, M8 gripper)",
     "← →        move it by one step (real arm: needs ARMED, a)",
     "+ / -      bigger / smaller step: 1 · 5 · 10 · 25 · 50 ticks",
     "l          go smoothly to the level pose from paddle.toml (asks first)",
+    "g          go smoothly to the --target pose (asks first; the whole path is checked)",
     "Space      FREEZE: every joint holds where it is",
     "Esc / q    back to Setup (the arm keeps holding; the bus is released for the run)",
     "",
@@ -109,7 +110,8 @@ struct App {
     pose_sel: usize,
     pose_step_i: usize,
     pose: Option<JogState>,
-    pose_confirm: bool,
+    /// Waiting for y/n to go to 'l' (level) or 'g' (target).
+    pose_confirm: Option<char>,
 }
 
 const ROWS: usize = 7 + 5 + 4;
@@ -172,7 +174,7 @@ pub async fn run(cfg: Settings, sc: SafetyConfig, _safety_path: PathBuf, opts: S
         pose_sel: 1,
         pose_step_i: 1,
         pose: None,
-        pose_confirm: false,
+        pose_confirm: None,
     };
     let mut terminal = ratatui::init();
     let res = async {
@@ -276,7 +278,7 @@ impl App {
         });
         self.log.clear();
         self.pose = None;
-        self.pose_confirm = false;
+        self.pose_confirm = None;
         self.mode = Mode::Pose { tx: ctx, rx: mrx, closing: false };
         self.msg(if self.sim { "simulated servos: nothing moves" } else { "opening the bus..." });
     }
@@ -401,7 +403,7 @@ impl App {
         }
         // FREEZE on the Pose screen has priority too.
         if matches!(self.mode, Mode::Pose { .. }) && k.code == KeyCode::Char(' ') {
-            self.pose_confirm = false;
+            self.pose_confirm = None;
             self.help = false;
             self.pose_send(JogCmd::Freeze);
             return;
@@ -494,17 +496,14 @@ impl App {
     }
 
     fn pose_key(&mut self, k: KeyEvent) {
-        if self.pose_confirm {
-            self.pose_confirm = false;
+        if let Some(which) = self.pose_confirm.take() {
             if k.code == KeyCode::Char('y') {
-                match self.opts.level7() {
-                    Some(to) => {
-                        let from = self.pose.map(|p| p.present).unwrap_or_default();
-                        let dist = (0..7).map(|j| (from[j] as i32 - to[j] as i32).abs()).max().unwrap_or(0) as f64;
-                        // ~200 ticks/s (18°/s), at least 2 s.
-                        self.pose_send(JogCmd::GoTo { to, secs: (dist / 200.0).max(2.0), name: "level".into() });
-                    }
-                    None => self.msg("no level pose: start with --config ~/paddle-ws/paddle.toml"),
+                let (to, name) = if which == 'g' { (self.opts.target, "target") } else { (self.opts.level7(), "level") };
+                if let Some(to) = to {
+                    let from = self.pose.map(|p| p.present).unwrap_or_default();
+                    let dist = (0..7).map(|j| (from[j] as i32 - to[j] as i32).abs()).max().unwrap_or(0) as f64;
+                    // ~120 ticks/s (10°/s), at least 2 s.
+                    self.pose_send(JogCmd::GoTo { to, secs: (dist / 120.0).max(2.0), name: name.into() });
                 }
             } else {
                 self.msg("cancelled");
@@ -529,11 +528,15 @@ impl App {
             KeyCode::Char('a') if !self.sim => {
                 self.armed_until = if self.armed() { None } else { Some(Instant::now() + ARM_TIMEOUT) };
             }
-            KeyCode::Char('l') => {
+            KeyCode::Char(c @ ('l' | 'g')) => {
                 if !self.armed() {
                     self.msg("press a to ARM first: this moves the arm");
+                } else if c == 'l' && self.opts.level7().is_none() {
+                    self.msg("no level pose: start with --config ~/paddle-ws/paddle.toml");
+                } else if c == 'g' && self.opts.target.is_none() {
+                    self.msg("no target: start with --target t1,t2,…,t7 (ticks of M1..M7)");
                 } else {
-                    self.pose_confirm = true;
+                    self.pose_confirm = Some(c);
                 }
             }
             KeyCode::Char('?') => self.help = true,
@@ -641,7 +644,11 @@ impl App {
             Mode::Running { .. } => ("RUNNING", vec![("Space", "SAFETY STOP (freeze)"), ("Esc", "stop & return to base"), ("?", "help")]),
             Mode::Done => ("RESULTS", vec![("Enter", "new run"), ("q", "quit"), ("?", "help")]),
             Mode::Pose { .. } => {
-                let mut k = vec![("↑↓", "joint"), ("←→", "move"), ("+/-", "step"), ("l", "level"), ("Space", "FREEZE"), ("Esc", "back")];
+                let mut k = vec![("↑↓", "joint"), ("←→", "move"), ("+/-", "step"), ("l", "level")];
+                if self.opts.target.is_some() {
+                    k.push(("g", "target"));
+                }
+                k.extend([("Space", "FREEZE"), ("Esc", "back")]);
                 if !self.sim {
                     k.insert(0, ("a", "arm"));
                 }
@@ -693,9 +700,10 @@ impl App {
                 Color::Yellow,
             );
         }
-        if self.pose_confirm {
-            let to = self.opts.level7().map_or("–".to_string(), |l| format!("{l:?}"));
-            popup(f, &format!("Move smoothly to the level pose {to}? THE ARM WILL MOVE. (y/n)"), Color::Yellow);
+        if let Some(which) = self.pose_confirm {
+            let (to, name) = if which == 'g' { (self.opts.target, "target") } else { (self.opts.level7(), "level pose") };
+            let to = to.map_or("–".to_string(), |l| format!("{l:?}"));
+            popup(f, &format!("Move smoothly to the {name} {to}? All joints move together; the whole path is checked first. THE ARM WILL MOVE. (y/n)"), Color::Yellow);
         }
         if self.help {
             let help: &[&str] = if matches!(self.mode, Mode::Pose { .. }) { &POSE_HELP } else { &HELP };

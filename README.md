@@ -41,7 +41,8 @@ About **74 s per joint**: about 3.7 min for the wrist (M5–M7). 4096 ticks = on
 
 **Pose screen** (`p` in Setup): move the arm by hand **without the station**, for example to a better base pose before a
 run. ↑↓ choose a joint (M1–M8, gripper included), ←→ move it one step (1 · 5 · 10 · 25 · 50 ticks with `+`/`-`), `l`
-goes smoothly to the level pose, **Space freezes**, Esc releases the bus and goes back to Setup. Real arm: needs ARMED
+goes smoothly to the level pose, `g` to the pose given with `--target t1,…,t7` (all joints together; both ask first
+and check the whole path), **Space freezes**, Esc releases the bus and goes back to Setup. Real arm: needs ARMED
 (`a`). Every step is checked before it is written: inside the joint's **calibrated range** (± 5 ticks), and the whole way
 keeps the table margin. While moving, the measured pose is checked every 30 ms and the arm freezes below the margin.
 The table shows each joint's angle, its room to the ends of its range, load, current and temperature.

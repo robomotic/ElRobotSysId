@@ -41,6 +41,11 @@ RUN/FREEZE/RETURN/LEAVE. A moving joint coasts ~1° (one 30 ms command delay) an
   t63 171 ms, slop 4.8; |load| ≤ 17.6 %, current ≤ 46 mA (mean 6 mA while moving). **Ke·N from duty·V_bus vs speed:**
   M7 2.54/2.53 (two runs), M2 2.95, M3 2.80, M5 3.08, M6 2.93 V·s/rad (corr ~0.95); load sign is opposite to speed.
   R still unidentified (needs ≥ 150 mA): fitter falls back to the datasheet 4.4 Ω.
+- **Load pose for R (2026-11-23, MuJoCo search on the norma-core URDF, arm 0.62 kg):** M2 1750, M3 2100, M4 2450
+  (others as now): arm half upright, gripper forward ~200 mm, 91 mm above the table; gravity M2/M3/M4 0.31/0.48/0.42 N m.
+  Reach it with the Pose screen `g` (`--target 2001,1750,2100,2450,1881,1869,2244`): straight path never below 51 mm,
+  back to level ≥ 85 mm. Moving M2 alone first would hit the table (the Pose screen refuses it). Search scripts were
+  in the session scratchpad (loadpose/search*.py), not in the repo.
 - **Electrical/thermal model (issue #2):** meta.toml decodes the protection registers; `--sim` servos have a DC motor
   model (R 4.4 Ω, Ke·N 2.5 V·s/rad); `--sim --cli` runs headless; `tools/fit_electrical.py` fits
   `|duty·V_bus − Ke·N·ω| = R·|i|` (the ST3215 current is a magnitude: never negative on the arm) and the supply-current
