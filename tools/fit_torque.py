@@ -23,6 +23,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import params_file  # noqa: E402
 from elrobot_model import Arm, read_meta_base  # noqa: E402
 
 MIN_TAU = 0.15  # N m of gravity load for a usable estimate
@@ -44,6 +45,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("session")
     ap.add_argument("--out", help="output TOML (default <session>/torque.toml)")
+    ap.add_argument("--write-params", action="store_true",
+                    help="write kt_eta_n and static_friction_nm per joint to servo_params.toml (not lower bounds)")
     a = ap.parse_args()
     base = read_meta_base(a.session)
     arm = Arm()
@@ -88,6 +91,13 @@ def main():
         if note:
             lines.append('note = "%s"' % note)
         lines.append("")
+        if a.write_params:
+            if ok and "lower bound" not in note:
+                vals = {"kt_eta_n": round(k, 3), "static_friction_nm": round(fric, 3)}
+                params_file.update(j, vals, source="fit_torque.py %s" % os.path.basename(a.session.rstrip("/")))
+                print("     written to servo_params.toml [servo.M%d]: %s" % (j, vals))
+            else:
+                print("     M%d not written (%s)" % (j, note or "no estimate"))
     out = a.out or os.path.join(a.session, "torque.toml")
     open(out, "w").write("\n".join(lines))
     print("written %s" % out)

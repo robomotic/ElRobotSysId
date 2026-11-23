@@ -195,13 +195,19 @@ current need the step loop (§7, §8).
 
 ## 4. Measured parameters
 
+**The machine-readable source of these numbers is [`servo_params.toml`](../servo_params.toml)** (issue #5): `[default]`
+for every joint, `[servo.Mn]` for what was measured on joint n. The fitters write it (`--write-params` on
+`tools/fit_electrical.py`, `tools/fit_torque.py`, `tools/servo_sim.py replay --fit`); `tools/servo_sim.py` and
+`unity/St3215Servo.cs` (`St3215Params.Load`) read it. The calibration (zero, sign, ranges) stays in
+`sysid_safety.toml`. The table below summarises it.
+
 | Parameter | Value | Source (run) | Notes |
 |---|---|---|---|
 | R | 4.04 / 4.17 / 4.17 Ω (M3/M2/M4) | standstill under load, `fit_electrical.py` (2026-11-23 load pose) | datasheet 4.4 Ω |
 | Ke·N | 1.5–2.0 V·s/rad | all runs, R fixed, `fit_electrical.py` | consistent loaded and unloaded |
 | Kt·η·N | 1.71 / 1.62 / 1.84 N·m/A (M2/M3/M4) | two-sided holds + MuJoCo gravity, `fit_torque.py` | relies on URDF masses (printed parts): to confirm with the stall test |
 | static friction | 0.26 / 0.31 / 0.41 N·m (M2/M3/M4, loaded); 0.02–0.05 (M7, unloaded) | holds and replay fits | load dependent |
-| k_d (duty per tick) | 0.0042 (M2–M4), 0.002–0.003 (M7) | `servo_sim.py fit_kp` | firmware P 16 |
+| k_d (duty per tick) | 0.0042 (M2–M4), 0.0021–0.0038 (wrist M5–M7, unloaded) | `servo_sim.py fit_kp` | firmware P 16; the same 0.0042 in `[default]` |
 | dead zone | ~4 ticks | replay fits | EEPROM says 1 |
 | delay | 65–110 ms outward, up to 145 ms back to base | step dead times (sysid summary) | model: 80 ms |
 | reversal slop | M2 4–10, M3 17–18, M4 0–15, M5 9, M6 17, M7 5–9 ticks | reversals test | gearbox backlash + dead zone |
@@ -301,28 +307,27 @@ Files in [`unity/`](../unity):
 
 | File | What |
 |---|---|
-| `St3215Servo.cs` | **the servo model in plain C#** (no Unity/MuJoCo types): `St3215Params` (all §4 numbers as defaults) and `St3215Servo` (`Command(goalTicks)`, `Step(dt, angleRad, velocityRadS) → torque`, readings: `Position`, `Speed`, `Load`, `ReportedCurrentMilliamp`, `TemperatureC`, internals `Duty`, `MotorCurrent`, `WindingC`, `Tripped`) |
+| `St3215Servo.cs` | **the servo model in plain C#** (no Unity/MuJoCo types): `St3215Params` (all §4 numbers as defaults; `Load(servo_params.toml, joint)`, `LoadCalibration(sysid_safety.toml, joint)`, and a minimal TOML reader `St3215Toml`) and `St3215Servo` (`Command(goalTicks)`, `Step(dt, angleRad, velocityRadS) → torque`, readings: `Position`, `Speed`, `Load`, `ReportedCurrentMilliamp`, `TemperatureC`, internals `Duty`, `MotorCurrent`, `WindingC`, `Tripped`) |
 | `ElRobotServoDriver.cs` | Unity/MuJoCo glue in the style of RoboSim's `BipedServoDriver`: finds each joint's `MjHingeJoint` (qpos/dof address) and `MjActuator` by name in `postInitEvent`, sets the stiff frictionloss and noslip on the compiled model, and in every `preUpdateEvent` writes `data->ctrl[actuator] = servo.Step(dt, qpos, qvel)` |
-| `St3215Servo.Check/` | `dotnet run --project unity/St3215Servo.Check`: 14 checks of the C# model (electrical law, supply current, delay, protection trip and cap, thermal steady state, closed-loop step, sign) |
+| `St3215Servo.Check/` | `dotnet run --project unity/St3215Servo.Check`: 19 checks of the C# model (electrical law, supply current, delay, protection trip and cap, thermal steady state, closed-loop step, sign) and of loading `servo_params.toml` / `sysid_safety.toml` (`[default]` reproduces `St3215Params.Default()`) |
 
-Use in a scene:
+Use in a scene, with both TOML files imported as text assets (`servoParams`, `sysidSafety`):
 
 ```csharp
 using ElRobotSysId;
 
 var names = new[] { "rev_motor_01", "rev_motor_02", "rev_motor_03", "rev_motor_04",
                     "rev_motor_05", "rev_motor_06", "rev_motor_07" };
-var zero  = new[] { 2050.3, 2053.0, 2051.3, 2053.0, 1842.7, 1924.5, 2198.6 };
 var level = new[] { 2003, 1002, 1942, 3185, 1864, 1892, 2226 };
-var friction = new[] { 0.05, 0.26, 0.31, 0.41, 0.05, 0.05, 0.05 };   // N m, §4
 var servos = new St3215Servo[7];
 for (int i = 0; i < 7; i++)
 {
-    var p = St3215Params.Default();
-    p.ZeroTicks = zero[i];
+    var p = St3215Params.Load(servoParams.text, i + 1)        // [default] + [servo.M<i+1>]
+                        .LoadCalibration(sysidSafety.text, i + 1); // zero, sign
     servos[i] = new St3215Servo(p, level[i]);
 }
-var driver = new ElRobotServoDriver(MjScene.Instance, robotRoot, names, servos, friction);
+// friction, damping and armature come from each servo's parameters
+var driver = new ElRobotServoDriver(MjScene.Instance, robotRoot, names, servos);
 
 // whenever the controller sends a goal (like a bus write):
 driver.Command(2, 2100);

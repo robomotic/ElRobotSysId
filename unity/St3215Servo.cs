@@ -7,6 +7,8 @@
 // 0.25-0.41 N m loaded (0.02-0.05 unloaded wrist), duty 0.42 %/tick, delay ~80 ms. Thermal constants are placeholders.
 
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 
 namespace ElRobotSysId
 {
@@ -42,12 +44,181 @@ namespace ElRobotSysId
         public double AmbientC = 25.0;
         public double MaxTemperatureC = 70.0;     // EEPROM max temperature: the servo unloads above it
 
+        // MuJoCo joint settings (applied by ElRobotServoDriver): gearbox stiction as frictionloss, viscous damping
+        // beyond the back-EMF, reflected rotor inertia. Friction is measured; damping and armature are not identified.
+        public double StaticFrictionNm = 0.3;
+        public double DampingNmSPerRad = 0.05;
+        public double ArmatureKgM2 = 0.01;
+
         // Ticks <-> joint angle: rad = Sign * (ticks - ZeroTicks) * 2 pi / 4096 (station viewer mapping, see
         // sysid_safety.toml). The sign must match the MuJoCo joint axis.
         public double ZeroTicks = 2048.0;
         public double Sign = 1.0;
 
         public static St3215Params Default() => new St3215Params();
+
+        // servo_params.toml key -> setter (the same keys as tools/servo_sim.py FILE_KEYS).
+        static readonly Dictionary<string, Action<St3215Params, double>> Keys = new Dictionary<string, Action<St3215Params, double>>
+        {
+            ["resistance_ohm"] = (p, v) => p.ResistanceOhm = v,
+            ["ke_n"] = (p, v) => p.KeN = v,
+            ["kt_eta_n"] = (p, v) => p.KtEtaN = v,
+            ["bus_voltage"] = (p, v) => p.BusVoltage = v,
+            ["copper_temp_coef"] = (p, v) => p.CopperTempCoef = v,
+            ["duty_per_tick"] = (p, v) => p.DutyPerTick = v,
+            ["dead_zone_ticks"] = (p, v) => p.DeadZoneTicks = v,
+            ["duty_cap"] = (p, v) => p.DutyCap = v,
+            ["delay_s"] = (p, v) => p.DelaySeconds = v,
+            ["protection_current_a"] = (p, v) => p.ProtectionCurrentA = v,
+            ["overload_duty"] = (p, v) => p.OverloadDuty = v,
+            ["protection_time_s"] = (p, v) => p.ProtectionTimeS = v,
+            ["protective_duty"] = (p, v) => p.ProtectiveDuty = v,
+            ["static_friction_nm"] = (p, v) => p.StaticFrictionNm = v,
+            ["damping_nm_s_per_rad"] = (p, v) => p.DampingNmSPerRad = v,
+            ["armature_kg_m2"] = (p, v) => p.ArmatureKgM2 = v,
+            ["winding_heat_capacity"] = (p, v) => p.WindingHeatCapacity = v,
+            ["case_heat_capacity"] = (p, v) => p.CaseHeatCapacity = v,
+            ["winding_to_case_k_per_w"] = (p, v) => p.WindingToCaseKPerW = v,
+            ["case_to_ambient_k_per_w"] = (p, v) => p.CaseToAmbientKPerW = v,
+            ["ambient_c"] = (p, v) => p.AmbientC = v,
+            ["max_temperature_c"] = (p, v) => p.MaxTemperatureC = v,
+        };
+
+        /// <summary>
+        /// Parameters of joint <paramref name="joint"/> (1..8) from the text of servo_params.toml: [default], then
+        /// [servo.M&lt;joint&gt;]. Keys that are missing keep this class's defaults; unknown keys are ignored.
+        /// Fill ZeroTicks/Sign from sysid_safety.toml with <see cref="LoadCalibration"/>.
+        /// </summary>
+        public static St3215Params Load(string servoParamsToml, int joint)
+        {
+            var doc = St3215Toml.Parse(servoParamsToml);
+            var p = Default();
+            foreach (var section in new[] { "default", "servo.M" + joint })
+                if (doc.TryGetValue(section, out var kv))
+                    foreach (var e in kv)
+                        if (Keys.TryGetValue(e.Key, out var set) && e.Value is double d)
+                            set(p, d);
+            return p;
+        }
+
+        /// <summary>Sets ZeroTicks and Sign of joint (1..7) from the text of sysid_safety.toml (top-level arrays
+        /// `zero` and `sign`); leaves them unchanged when a key is missing.</summary>
+        public St3215Params LoadCalibration(string sysidSafetyToml, int joint)
+        {
+            var top = St3215Toml.Parse(sysidSafetyToml);
+            if (top.TryGetValue("", out var kv))
+            {
+                if (kv.TryGetValue("zero", out var z) && z is List<object> zl && joint - 1 < zl.Count && zl[joint - 1] is double zd)
+                    ZeroTicks = zd;
+                if (kv.TryGetValue("sign", out var s) && s is List<object> sl && joint - 1 < sl.Count && sl[joint - 1] is double sd)
+                    Sign = sd;
+            }
+            return this;
+        }
+    }
+
+    /// <summary>
+    /// Just enough TOML for servo_params.toml and sysid_safety.toml: [sections], key = number | "string" | true/false |
+    /// [arrays, possibly nested and over several lines], # comments. Numbers come back as double, arrays as List&lt;object&gt;.
+    /// </summary>
+    public static class St3215Toml
+    {
+        public static Dictionary<string, Dictionary<string, object>> Parse(string text)
+        {
+            var doc = new Dictionary<string, Dictionary<string, object>> { [""] = new Dictionary<string, object>() };
+            string section = "", key = null, pending = null;
+            foreach (var raw in text.Replace("\r", "").Split('\n'))
+            {
+                string line = StripComment(raw).Trim();
+                if (pending != null)
+                {
+                    pending += " " + line;
+                    if (Count(pending, '[') <= Count(pending, ']'))
+                    {
+                        doc[section][key] = Value(pending);
+                        pending = null;
+                    }
+                    continue;
+                }
+                if (line.Length == 0)
+                    continue;
+                if (line[0] == '[' && line[line.Length - 1] == ']' && line.IndexOf('=') < 0)
+                {
+                    section = line.Substring(1, line.Length - 2).Trim();
+                    if (!doc.ContainsKey(section))
+                        doc[section] = new Dictionary<string, object>();
+                    continue;
+                }
+                int eq = line.IndexOf('=');
+                if (eq <= 0)
+                    throw new FormatException("TOML: cannot parse line: " + raw);
+                key = line.Substring(0, eq).Trim();
+                string val = line.Substring(eq + 1).Trim();
+                if (val.StartsWith("[") && Count(val, '[') > Count(val, ']'))
+                    pending = val;
+                else
+                    doc[section][key] = Value(val);
+            }
+            return doc;
+        }
+
+        static int Count(string s, char c)
+        {
+            int n = 0;
+            foreach (var ch in s)
+                if (ch == c) n++;
+            return n;
+        }
+
+        static string StripComment(string line)
+        {
+            bool quoted = false;
+            for (int i = 0; i < line.Length; i++)
+            {
+                if (line[i] == '"') quoted = !quoted;
+                if (line[i] == '#' && !quoted) return line.Substring(0, i);
+            }
+            return line;
+        }
+
+        static object Value(string s)
+        {
+            int i = 0;
+            var v = ParseValue(s, ref i);
+            return v;
+        }
+
+        static object ParseValue(string s, ref int i)
+        {
+            while (i < s.Length && char.IsWhiteSpace(s[i])) i++;
+            if (i >= s.Length) throw new FormatException("TOML: missing value");
+            if (s[i] == '[')
+            {
+                i++;
+                var list = new List<object>();
+                while (true)
+                {
+                    while (i < s.Length && (char.IsWhiteSpace(s[i]) || s[i] == ',')) i++;
+                    if (i >= s.Length) throw new FormatException("TOML: unclosed array");
+                    if (s[i] == ']') { i++; return list; }
+                    list.Add(ParseValue(s, ref i));
+                }
+            }
+            if (s[i] == '"')
+            {
+                int end = s.IndexOf('"', i + 1);
+                if (end < 0) throw new FormatException("TOML: unclosed string");
+                var str = s.Substring(i + 1, end - i - 1);
+                i = end + 1;
+                return str;
+            }
+            int start = i;
+            while (i < s.Length && s[i] != ',' && s[i] != ']' && !char.IsWhiteSpace(s[i])) i++;
+            string tok = s.Substring(start, i - start);
+            if (tok == "true") return true;
+            if (tok == "false") return false;
+            return double.Parse(tok.Replace("_", ""), NumberStyles.Float, CultureInfo.InvariantCulture);
+        }
     }
 
     /// <summary>One servo. Call <see cref="Command"/> when a goal is sent and <see cref="Step"/> every physics step.</summary>

@@ -28,9 +28,16 @@ namespace ElRobotSysId
 
         /// <param name="names">Joint (and actuator) names, e.g. rev_motor_01 .. rev_motor_07.</param>
         /// <param name="servos">One model per joint, in the same order (parameters per joint: friction differs).</param>
-        /// <param name="staticFrictionNm">Gearbox static friction per joint (N m), given to MuJoCo as frictionloss.</param>
-        public ElRobotServoDriver(MjScene scene, GameObject robot, string[] names, St3215Servo[] servos, double[] staticFrictionNm)
+        /// <param name="staticFrictionNm">Gearbox static friction per joint (N m), given to MuJoCo as frictionloss; null =
+        /// each servo's <see cref="St3215Params.StaticFrictionNm"/> (from servo_params.toml).</param>
+        public ElRobotServoDriver(MjScene scene, GameObject robot, string[] names, St3215Servo[] servos, double[] staticFrictionNm = null)
         {
+            if (staticFrictionNm == null)
+            {
+                staticFrictionNm = new double[servos.Length];
+                for (int i = 0; i < servos.Length; i++)
+                    staticFrictionNm[i] = servos[i].P.StaticFrictionNm;
+            }
             if (names.Length != servos.Length || names.Length != staticFrictionNm.Length)
                 throw new ArgumentException("names, servos and friction need one entry per joint");
             _scene = scene;
@@ -72,6 +79,8 @@ namespace ElRobotSysId
                 // Gearbox stiction. MuJoCo's frictionloss is soft by default: a sustained load creeps through it (a held
                 // arm sagged 20+ ticks/s). A stiff constraint plus noslip iterations makes it hold like the real gearbox.
                 m->dof_frictionloss[d] = _staticFriction[i];
+                m->dof_damping[d] = Servos[i].P.DampingNmSPerRad;
+                m->dof_armature[d] = Servos[i].P.ArmatureKgM2;
                 m->dof_solref[2 * d] = 0.002;
                 m->dof_solref[2 * d + 1] = 1.0;
                 m->dof_solimp[5 * d] = 0.99;

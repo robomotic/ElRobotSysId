@@ -28,11 +28,15 @@ Needs numpy only (Python 3.8+).
 import argparse
 import csv
 import math
+import os
 import re
 import sys
 from pathlib import Path
 
 import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import params_file  # noqa: E402
 
 TICKS_PER_REV = 4096.0
 MIN_DUTY_B = 0.05  # model B divides by |duty|; skip samples below this
@@ -172,6 +176,8 @@ def main():
     ap.add_argument("session", type=Path, help="sysid_logs/<stamp>_<payload> folder (meta.toml + M<n>.csv)")
     ap.add_argument("--eta", type=float, default=1.0, help="gearbox efficiency for the MuJoCo gains (placeholder)")
     ap.add_argument("--out", type=Path, help="output TOML (default <session>/electrical.toml)")
+    ap.add_argument("--write-params", action="store_true",
+                    help="write ke_n (and resistance_ohm when measured at standstill) per joint to servo_params.toml")
     a = ap.parse_args()
 
     meta_path = a.session / "meta.toml"
@@ -194,6 +200,12 @@ def main():
             print("M%-3d %s" % (jid, f["note"]))
             lines.append("")
             continue
+        if a.write_params:
+            vals = {"ke_n": round(f["ke_n"], 3)}
+            if f["r_source"].startswith("standstill"):
+                vals["resistance_ohm"] = round(f["r_ohm"], 3)
+            params_file.update(jid, vals, source="fit_electrical.py %s" % a.session.name)
+            print("     written to servo_params.toml [servo.M%d]: %s" % (jid, vals))
         temp = "%.0f-%.0f" % tuple(f["temp_c"])
         print("M%-3d %7.3f %6.3f %7d %+5d %7.2f  %-28s %8s" % (
             jid, f["ke_n"], f["ke_n_corr"], f["ke_n_samples"], f["duty_sign"], f["r_ohm"], f["r_source"][:28], temp))

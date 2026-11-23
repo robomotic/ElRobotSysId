@@ -38,6 +38,7 @@ import mujoco
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import params_file  # noqa: E402
 from elrobot_model import RAD_PER_TICK, Arm, q_to_ticks, read_meta_base  # noqa: E402
 
 DT = 0.001
@@ -49,8 +50,8 @@ class ServoParams:
     ke_n: float = 1.8  # V s/rad at the output
     kt_eta_n: float = 1.7  # N m/A at the output
     v_bus: float = 12.1
-    kp_duty: float = 0.004  # duty per tick of error (0.4 %/tick; firmware P 16)
-    dead_zone: float = 3.0  # ticks of |error| with no drive
+    kp_duty: float = 0.0042  # duty per tick of error (0.42 %/tick; firmware P 16)
+    dead_zone: float = 4.0  # ticks of |error| with no drive
     duty_cap: float = 0.5  # Max Torque 500
     delay_s: float = 0.08
     static_friction: float = 0.3  # N m (MuJoCo frictionloss)
@@ -68,6 +69,32 @@ class ServoParams:
     r_ca: float = 15.0  # K/W case -> ambient
     t_amb: float = 25.0
     t_max: float = 70.0  # max_temperature_c
+    copper_coef: float = 0.0039  # 1/K
+
+    @classmethod
+    def from_file(cls, joint, path=None, **overrides):
+        """[default] + [servo.M<joint>] of servo_params.toml (issue #5); missing keys keep the defaults above, then
+        `overrides` (None values are ignored)."""
+        vals = params_file.joint_params(joint, path or params_file.PARAMS)
+        kw = {attr: float(vals[key]) for key, attr in FILE_KEYS.items() if key in vals}
+        kw.update({k: v for k, v in overrides.items() if v is not None})
+        return cls(**kw)
+
+    def to_file_values(self, attrs):
+        inv = {v: k for k, v in FILE_KEYS.items()}
+        return {inv[a]: getattr(self, a) for a in attrs}
+
+
+# servo_params.toml key -> ServoParams attribute (the same keys as unity/St3215Servo.cs St3215Params.Load).
+FILE_KEYS = {
+    "resistance_ohm": "r_ohm", "ke_n": "ke_n", "kt_eta_n": "kt_eta_n", "bus_voltage": "v_bus",
+    "copper_temp_coef": "copper_coef", "duty_per_tick": "kp_duty", "dead_zone_ticks": "dead_zone",
+    "duty_cap": "duty_cap", "delay_s": "delay_s", "protection_current_a": "i_prot", "overload_duty": "overload",
+    "protection_time_s": "prot_time", "protective_duty": "protective", "static_friction_nm": "static_friction",
+    "damping_nm_s_per_rad": "damping", "armature_kg_m2": "armature", "winding_heat_capacity": "c_w",
+    "case_heat_capacity": "c_c", "winding_to_case_k_per_w": "r_wc", "case_to_ambient_k_per_w": "r_ca",
+    "ambient_c": "t_amb", "max_temperature_c": "t_max",
+}
 
 
 @dataclass
@@ -120,7 +147,7 @@ class ArmSim:
             err = s.goal - pos[j]
             cap = p.protective if s.tripped else p.duty_cap
             s.duty = 0.0 if abs(err) <= p.dead_zone else float(np.clip(p.kp_duty * err, -cap, cap))
-            r = p.r_ohm * (1 + 0.0039 * (s.t_w - 25.0))
+            r = p.r_ohm * (1 + p.copper_coef * (s.t_w - 25.0))
             s.i_motor = (s.duty * p.v_bus - p.ke_n * omega[j]) / r
             tau[j] = p.kt_eta_n * s.i_motor
             # protection
@@ -184,7 +211,8 @@ def replay(session, joint, params, log=None):
     # off its commanded base; starting at the base gave M3 a constant +3.9-tick bias), the servo's goal is the base.
     start = list(base)
     start[j] = int(round(log["position"][0]))
-    sim = ArmSim(params, start)
+    # The tested joint gets `params`; the others hold with their own values from servo_params.toml.
+    sim = ArmSim([params if k == j else ServoParams.from_file(k + 1) for k in range(7)], start)
     sim.s[j].goal = float(base[j])
     t_log, goal = log["t"], log["goal"]
     out = np.zeros(len(t_log))
@@ -211,10 +239,10 @@ def cmd_replay(a):
     best = None
     # The stick-slip staircase of the real joints is set by the dead zone and the static friction; armature and
     # damping matter much less. --fit searches the first two.
-    grid = ([(dz, fr) for dz in (4.0, 8.0, 12.0, 16.0) for fr in (0.05, 0.15, 0.3, 0.5)] if a.fit else [(a.dead_zone, a.friction)])
+    grid = ([(dz, fr) for dz in (4.0, 8.0, 12.0, 16.0) for fr in (0.02, 0.05, 0.15, 0.3, 0.5)] if a.fit else [(a.dead_zone, a.friction)])
     for dz, fr in grid:
-        p = ServoParams(kp_duty=kp, armature=a.armature, damping=a.damping, static_friction=fr, dead_zone=dz,
-                        delay_s=a.delay, ke_n=a.ke_n, kt_eta_n=a.kt, r_ohm=a.r)
+        p = ServoParams.from_file(a.joint, kp_duty=kp, armature=a.armature, damping=a.damping, static_friction=fr,
+                                  dead_zone=dz, delay_s=a.delay, ke_n=a.ke_n, kt_eta_n=a.kt, r_ohm=a.r)
         pos, cur = replay(a.session, a.joint, p, log)
         rms = float(np.sqrt(np.mean((pos - log["position"]) ** 2)))
         print("  dead zone %4.1f ticks  friction %.2f N m  ->  position RMS %.2f ticks" % (dz, fr, rms))
@@ -226,6 +254,13 @@ def cmd_replay(a):
     print("M%d: best dead zone %.1f ticks, friction %.2f N m: position RMS %.2f ticks (measured range %d ticks); "
           "reported current mean sim %.0f / real %.0f mA" % (a.joint, p.dead_zone, p.static_friction, rms,
                                                               np.ptp(log["position"]), cur.mean(), log["current_ma"].mean()))
+    if a.write_params:
+        if not a.fit:
+            print("--write-params needs --fit: nothing written")
+        else:
+            vals = p.to_file_values(["kp_duty", "dead_zone", "static_friction"])
+            params_file.update(a.joint, vals, source="servo_sim.py replay --fit %s" % os.path.basename(a.session.rstrip("/")))
+            print("written to %s [servo.M%d]: %s" % (params_file.PARAMS, a.joint, vals))
     seg = np.array(log["segment"])
     for name in ("step+50", "step-50", "ramp_across", "chirp"):
         m = seg == name
@@ -254,7 +289,7 @@ def cmd_replay(a):
 
 def cmd_heat(a):
     pose = [int(x) for x in a.pose.split(",")]
-    p = ServoParams(ke_n=a.ke_n, kt_eta_n=a.kt, r_ohm=a.r, static_friction=a.friction)
+    p = ServoParams.from_file(a.joint, ke_n=a.ke_n, kt_eta_n=a.kt, r_ohm=a.r, static_friction=a.friction)
     sim = ArmSim(p, pose)
     j = a.joint - 1
     # Approach the pose from below so the motor (not friction) carries the load: command it 30 ticks lower, then up.
@@ -281,17 +316,20 @@ def main():
     for name in ("replay", "heat"):
         s = sub.add_parser(name)
         s.add_argument("--joint", type=int, required=True)
-        s.add_argument("--ke-n", type=float, default=1.8)
-        s.add_argument("--kt", type=float, default=1.7, help="Kt*eta*N, N m/A")
-        s.add_argument("--r", type=float, default=4.1)
-        s.add_argument("--friction", type=float, default=0.3, help="static friction, N m")
+        # Unset options come from servo_params.toml ([default] + [servo.M<joint>]).
+        s.add_argument("--ke-n", type=float)
+        s.add_argument("--kt", type=float, help="Kt*eta*N, N m/A")
+        s.add_argument("--r", type=float)
+        s.add_argument("--friction", type=float, help="static friction, N m")
     r = sub.choices["replay"]
     r.add_argument("session")
-    r.add_argument("--delay", type=float, default=0.08)
-    r.add_argument("--dead-zone", type=float, default=3.0)
-    r.add_argument("--armature", type=float, default=0.01)
-    r.add_argument("--damping", type=float, default=0.05)
+    r.add_argument("--delay", type=float)
+    r.add_argument("--dead-zone", type=float)
+    r.add_argument("--armature", type=float)
+    r.add_argument("--damping", type=float)
     r.add_argument("--fit", action="store_true", help="small grid over dead zone and static friction")
+    r.add_argument("--write-params", action="store_true",
+                   help="with --fit: write duty_per_tick, dead_zone_ticks, static_friction_nm to servo_params.toml")
     r.add_argument("--plot")
     h = sub.choices["heat"]
     h.add_argument("--pose", required=True, help="7 ticks M1..M7")

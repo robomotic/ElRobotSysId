@@ -68,6 +68,13 @@ RUN/FREEZE/RETURN/LEAVE. A moving joint coasts ~1° (one 30 ms command delay) an
   y ≈ 45), arm 100 mm. M8 axis = gripper y; at level 129 mm above the table. `boom_spheres` model it (payload "boom";
   `--stall 8` adds them). Mark the gear's angle before removing it (gripper calibration). Not printed/run yet.
   Alternative without printing: fingertips on M6 (--into 1, lever ~160 mm). --stall-max default 20.
+- **servo_params.toml (issue #5, 2026-11-23):** fitted parameters per joint (`[default]` + `[servo.Mn]`), read by
+  tools/servo_sim.py (`ServoParams.from_file`), tools/elrobot_model.py (calibration from sysid_safety.toml) and
+  unity/St3215Servo.cs (`St3215Params.Load`, `LoadCalibration`); written by the fitters with `--write-params`
+  (tools/params_file.py keeps comments). Tests: tools/test_params_file.py, unity/St3215Servo.Check (19 checks).
+- Open issues: #3 BAM bench calibration of one follower servo (pendulum not printed yet; upstream BAM's STS3215
+  profile is 7.4 V/1:345, fitted command delay 5 ms → our 70–100 ms "dead time" is probably stiction + the firmware's
+  target rate limiter, still to add to servo_sim.py), #4 the same for the leader's ST-3215-C046 (7.4 V, 1:147).
 - **Electrical/thermal model (issue #2):** meta.toml decodes the protection registers; `--sim` servos have a DC motor
   model (R 4.4 Ω, Ke·N 2.5 V·s/rad); `--sim --cli` runs headless; `tools/fit_electrical.py` fits
   `|duty·V_bus − Ke·N·ω| = R·|i|` (the ST3215 current is a magnitude: never negative on the arm) and the supply-current

@@ -13,10 +13,21 @@ URDF = os.path.expanduser(os.environ.get(
     "ELROBOT_URDF", "~/DevOps/norma-core/hardware/elrobot/simulation/elrobot_follower.urdf"))
 TICKS_PER_REV = 4096.0
 RAD_PER_TICK = 2 * np.pi / TICKS_PER_REV
-# Same as SafetyConfig::default(): sign +1, zeros from the station viewer mapping matched at level (2026-11-21).
+# The calibration lives in sysid_safety.toml (issue #5); these are SafetyConfig::default()'s values, used only when
+# the file is missing a key: sign +1, zeros from the station viewer mapping matched at level (2026-11-21).
 ZERO = [2050.3, 2053.0, 2051.3, 2053.0, 1842.7, 1924.5, 2198.6]
+SIGN = [1.0] * 7
 RANGE_MIN = [1087, 1004, 935, 900, 141, 1040, 134, 1237]
 RANGE_MAX = [3009, 3092, 3161, 3196, 3955, 3056, 3962, 2859]
+try:
+    import params_file as _pf
+    _cal = _pf.calibration()
+    ZERO = [float(z) for z in (_cal.get("zero") or ZERO)]
+    SIGN = [float(x) for x in (_cal.get("sign") or SIGN)]
+    RANGE_MIN = list(_cal.get("range_min") or RANGE_MIN)
+    RANGE_MAX = list(_cal.get("range_max") or RANGE_MAX)
+except (ImportError, OSError, ValueError):
+    pass
 JOINTS = ["rev_motor_0%d" % (i + 1) for i in range(7)]
 
 
@@ -39,11 +50,11 @@ def load_model(urdf=URDF):
 
 
 def ticks_to_q(ticks):
-    return np.array([(ticks[i] - ZERO[i]) * RAD_PER_TICK for i in range(7)])
+    return np.array([SIGN[i] * (ticks[i] - ZERO[i]) * RAD_PER_TICK for i in range(7)])
 
 
 def q_to_ticks(q):
-    return np.array([q[i] / RAD_PER_TICK + ZERO[i] for i in range(7)])
+    return np.array([q[i] / (SIGN[i] * RAD_PER_TICK) + ZERO[i] for i in range(7)])
 
 
 class Arm:

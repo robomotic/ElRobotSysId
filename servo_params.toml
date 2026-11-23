@@ -1,0 +1,78 @@
+# Fitted ST3215 parameters, ElRobot follower 5B14033257 (docs/SERVO_MODEL.md §4, issue #5).
+# Read by tools/servo_sim.py and unity/St3215Servo.cs (St3215Params.Load); written by the fitters with --write-params
+# (tools/fit_electrical.py, tools/fit_torque.py, tools/servo_sim.py replay --fit). [default] applies to every joint,
+# [servo.Mn] overrides only what was measured on that joint. SI units at the joint output, names carry the unit.
+# Ticks <-> angle (zero, sign) and the calibrated ranges stay in sysid_safety.toml.
+arm = "5B14033257"            # follower serial: a consumer warns if it opened another adapter
+fitted = "2026-11-23"
+source = "fit_electrical + fit_torque on 1795395590, servo_sim replay --fit on 1795303354"
+placeholders = ["winding_heat_capacity", "case_heat_capacity", "winding_to_case_k_per_w", "case_to_ambient_k_per_w"]
+
+[default]
+# Motor (fit_electrical.py: R at standstill under load, Ke*N with R fixed; fit_torque.py: Kt*eta*N from the holds)
+resistance_ohm = 4.1
+ke_n = 1.8                    # V s/rad at the output
+kt_eta_n = 1.7                # N m/A at the output; uses the URDF masses: to confirm on the bench (#3)
+bus_voltage = 12.1
+copper_temp_coef = 0.0039     # 1/K
+# Firmware position loop (EEPROM P 16, Max Torque 500)
+duty_per_tick = 0.0042
+dead_zone_ticks = 4.0
+duty_cap = 0.5
+delay_s = 0.08
+# Protection (EEPROM: protection current 500 x 6.5 mA, overload 25 %, 200 x 10 ms, protective 20 %)
+protection_current_a = 3.25
+overload_duty = 0.25
+protection_time_s = 2.0
+protective_duty = 0.20
+# Gearbox stiction (MuJoCo frictionloss) and the MuJoCo joint settings
+static_friction_nm = 0.3
+damping_nm_s_per_rad = 0.05   # beyond back-EMF; not identified
+armature_kg_m2 = 0.01         # rotor inertia x N^2; not identified
+# Heating: placeholders until a thermal test
+winding_heat_capacity = 3.0   # J/K
+case_heat_capacity = 40.0     # J/K
+winding_to_case_k_per_w = 3.0
+case_to_ambient_k_per_w = 15.0
+ambient_c = 25.0
+max_temperature_c = 70.0
+
+[servo.M2]
+# R, Ke*N: fit_electrical 1795395590 (load pose, +-50); Kt*eta*N, friction: fit_torque same run
+resistance_ohm = 4.175
+kt_eta_n = 1.708
+static_friction_nm = 0.258
+ke_n = 1.63
+
+[servo.M3]
+# R, Ke*N: fit_electrical 1795395590 (load pose, +-50); Kt*eta*N, friction: fit_torque same run
+resistance_ohm = 4.054
+kt_eta_n = 1.619
+static_friction_nm = 0.305
+ke_n = 1.81
+
+[servo.M4]
+# R, Ke*N: fit_electrical 1795395590. Kt*eta*N and friction are LOWER BOUNDS (fit_torque: one hold side read
+# ~0 A, friction >= gravity there), so fit_torque does not overwrite them
+resistance_ohm = 4.175
+kt_eta_n = 1.84
+static_friction_nm = 0.41
+ke_n = 1.81
+
+[servo.M5]
+# servo_sim.py replay --fit 1795303354 (wrist, +-50)
+duty_per_tick = 0.003639
+dead_zone_ticks = 8.0
+static_friction_nm = 0.02
+
+[servo.M6]
+# servo_sim.py replay --fit 1795303354 (wrist, +-50)
+duty_per_tick = 0.003759
+dead_zone_ticks = 4.0
+static_friction_nm = 0.15
+
+[servo.M7]
+# servo_sim.py replay --fit 1795303354 (wrist, +-50; held out on 1795366217: 4.0 ticks RMS)
+duty_per_tick = 0.003214
+static_friction_nm = 0.02
+dead_zone_ticks = 4.0
