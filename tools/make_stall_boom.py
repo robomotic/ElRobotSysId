@@ -1,25 +1,36 @@
 #!/usr/bin/env python3
-"""Printable boom for the stall test (issue #2): screws onto the gripper's camera mount in place of the U20CAM.
+"""Printable boom for the stall test (issue #2), screwed onto the M8 (gripper) servo horn in place of the gripper gear.
 
-WARNING (2026-11-23, user: "the camera base is quite fragile"): do NOT use it on the camera mount. The whole joint
-torque (up to ~0.85 N m) would pass through the mount's thin post, snap fit and M2 self-tapping screws, which carry a
-14 g camera (~0.01 N m). Use the fingertips on M6 instead (README, stall test). Kept as a geometry reference.
+Why there: the horn is made to carry the servo's full torque, so the test load goes straight into the servo and nothing
+fragile sits in between. (A first design on the camera mount was withdrawn: the user pointed out the camera base is
+fragile, and the whole joint torque would have gone through it.)
 
-Geometry (plate frame: x = sideways along the gripper's jaw-closing axis, y = in the seat plane "up", z = out of the
-seat; the seat faces forward and 24 deg up, so the camera looks forward/down):
-- plate 44 x 44 x 4 mm with 4 diagonal slots for M2 screws (2.4 mm wide): fits square hole patterns of 26-35 mm.
-  The norma-core CameraMount_square_27mm.stp has its 4 x 2.0 mm pilot holes 33.8 mm apart (M2 self-tapping).
-- arm 100 mm sideways (+x), 14 mm tall (in the seat plane, which is the load direction) x 10 mm thick.
-- leg at x = 100 mm going 55 mm down the seat plane, ending in a 5 mm-radius rounded nub that presses on the scale.
+Taking the fingers off: unscrew the 4 M3 screws that hold the gripper gear to the M8 horn (the horn itself stays on the
+servo spline); the jaws come off with the gear. MARK the gear's angle on the horn first, so it goes back at the same
+angle and the station's gripper calibration stays valid.
 
-At the level pose the nub is ~139 mm above the table and ~99 mm (horizontally) from the M7 roll axis; lower M7 ticks
-press it down (stall test: --stall 7 --into -1 --lever-mm <measured>). Measure the lever on the arm: horizontal
-distance from the gripper's roll axis to the nub's contact point.
+Interface, copied from norma-core Gripper_Gear.stp / "Gripper Gear.stl":
+- 4 x 3.3 mm holes on a 14 mm circle (0/90/180/270 deg), centre hole 7 mm;
+- a 23.5 mm recess, 3.15 mm deep, that centres the part on the horn; 2.85 mm of material under the screw heads, so the
+  gear's own M3 screws fit.
 
-Print: PETG or PLA, plate flat on the bed (the leg then stands up), 100 % infill or 6 walls, no supports needed.
-Load: ~10 N at the nub at the test's 17 % duty -> ~1 N m at the plate; the section takes it with a large margin.
+Geometry (part frame: z = the M8 axis, pointing away from the servo, i.e. forward along the fingers; z = 0 is the
+horn face; x = sideways):
+- hub: disc 34 mm, recess 23.6 x 3.15 on the horn side, 4 x 3.4 mm holes on 14 mm, centre 7 mm, flange 2.85 mm;
+- standoff tube 34/22 mm up to z = 20 (the gripper base reaches 12 mm in front of the horn and +-40 mm sideways: the
+  arm has to pass in front of it); the 22 mm bore leaves the 4 screws reachable with a screwdriver from the front;
+- arm at z = 20..28 (8 mm), 14 mm tall, out to the nub at 100 mm from the axis;
+- nub: R 5 mm on the arm's lower edge at x = 100 mm (the contact point on the scale).
 
-Usage: python3 tools/make_stall_boom.py [--out hardware/stall_boom.stl]   (needs trimesh + manifold3d)
+At the level pose the M8 axis is ~129 mm above the table; the nub's lowest point ~117 mm. Lever = horizontal distance
+from the M8 axis to the nub's contact point: 100 mm by design (measure it). The 4-hole pattern lets the arm point to
+either side (90 deg steps); find the pressing direction on the Pose screen (M8, 1-5 tick steps).
+
+Print: PETG or PLA, arm side (z = 28 face) down on the bed so the tube stands up, 100 % infill or 6 walls; the horn
+recess is then on top (no supports). Load: <= ~0.85 N m (8.5 N at the nub) at the default --stall-max 20 even with
+Kt*eta*N 1.7: small for this section.
+
+Usage: python3 tools/make_stall_boom.py [--out hardware/stall_boom_m8.stl]   (needs trimesh + manifold3d)
 """
 import argparse
 import os
@@ -27,16 +38,25 @@ import os
 import numpy as np
 import trimesh
 
-PLATE = 44.0
-PLATE_T = 4.0
-SLOT_W = 2.4
-SLOT_SQUARE = (26.0, 35.0)  # hole-pattern sides the slots cover
-ARM_L = 100.0
-ARM_H = 14.0  # in the seat plane (y), the load direction
-ARM_T = 10.0  # out of the seat (z)
-LEG_L = 55.0
-LEG_W = 12.0
-NUB_R = 5.0  # = ARM_T / 2: flush with both faces, so the part prints flat
+HUB_D = 34.0
+RECESS_D = 23.6
+RECESS_DEPTH = 3.15
+FLANGE = 2.85
+HOLE_D = 3.4
+HOLE_PCD = 14.0
+CENTRE_D = 7.0
+BORE_D = 22.0
+STANDOFF = 20.0  # horn face to the arm's back face
+ARM_T = 8.0  # along the axis
+ARM_H = 14.0  # tangential: the load direction
+LEVER = 100.0
+NUB_R = 5.0
+
+
+def cyl(d, z0, z1, x=0.0, y=0.0, sections=96):
+    c = trimesh.creation.cylinder(radius=d / 2, height=z1 - z0, sections=sections)
+    c.apply_translation((x, y, (z0 + z1) / 2))
+    return c
 
 
 def box(x0, x1, y0, y1, z0, z1):
@@ -45,37 +65,28 @@ def box(x0, x1, y0, y1, z0, z1):
     return b
 
 
-def slot(angle_deg, r0, r1, w, z0, z1):
-    """A slot along a ray from the origin, from radius r0 to r1 (rounded ends)."""
-    a = np.radians(angle_deg)
-    d = np.array([np.cos(a), np.sin(a), 0.0])
-    length = r1 - r0
-    body = trimesh.creation.box(extents=(length, w, z1 - z0))
-    body.apply_transform(trimesh.transformations.rotation_matrix(a, (0, 0, 1)))
-    body.apply_translation(d * (r0 + r1) / 2 + (0, 0, (z0 + z1) / 2))
-    ends = [trimesh.creation.cylinder(radius=w / 2, height=z1 - z0, sections=32) for _ in range(2)]
-    for e, r in zip(ends, (r0, r1)):
-        e.apply_translation(d * r + (0, 0, (z0 + z1) / 2))
-    return trimesh.boolean.union([body] + ends)
-
-
 def build():
-    # Outward from the seat is +z here (the seat face is z = 0); the plate is z in [0, 4].
-    plate = box(-PLATE / 2, PLATE / 2, -PLATE / 2, PLATE / 2, 0, PLATE_T)
-    arm = box(0, ARM_L + LEG_W / 2, -ARM_H / 2, ARM_H / 2, 0, ARM_T)
-    leg = box(ARM_L - LEG_W / 2, ARM_L + LEG_W / 2, -LEG_L, ARM_H / 2, 0, ARM_T)
+    top = STANDOFF + ARM_T
+    tube = cyl(HUB_D, 0, top)
+    arm = box(0, LEVER, -ARM_H / 2, ARM_H / 2, STANDOFF, top)
     nub = trimesh.creation.icosphere(subdivisions=3, radius=NUB_R)
-    nub.apply_translation((ARM_L, -LEG_L, ARM_T / 2))
-    gusset = box(PLATE / 2 - 6, PLATE / 2 + 14, -ARM_H / 2 - 2, ARM_H / 2 + 2, 0, ARM_T)  # stiffer root, clear of screw heads
-    solid = trimesh.boolean.union([plate, arm, leg, nub, gusset])
-    r0, r1 = SLOT_SQUARE[0] / np.sqrt(2), SLOT_SQUARE[1] / np.sqrt(2)
-    cuts = [slot(a, r0, r1, SLOT_W, -1, ARM_T + 1) for a in (45, 135, 225, 315)]
+    nub.apply_translation((LEVER, -ARM_H / 2, STANDOFF + ARM_T / 2))
+    root = box(HUB_D / 2 - 4, HUB_D / 2 + 12, -ARM_H / 2 - 3, ARM_H / 2 + 3, STANDOFF - 6, top)  # stiffer root
+    solid = trimesh.boolean.union([tube, arm, nub, root])
+    cuts = [
+        cyl(RECESS_D, -1, RECESS_DEPTH),  # sits over the horn
+        cyl(BORE_D, RECESS_DEPTH + FLANGE, top + 1),  # screwdriver access from the front
+        cyl(CENTRE_D, -1, top + 1),
+    ]
+    for a in (0, 90, 180, 270):
+        x, y = HOLE_PCD / 2 * np.cos(np.radians(a)), HOLE_PCD / 2 * np.sin(np.radians(a))
+        cuts.append(cyl(HOLE_D, -1, top + 1, x, y, sections=32))
     return trimesh.boolean.difference([solid] + cuts)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out", default=os.path.join(os.path.dirname(__file__), "..", "hardware", "stall_boom.stl"))
+    ap.add_argument("--out", default=os.path.join(os.path.dirname(__file__), "..", "hardware", "stall_boom_m8.stl"))
     a = ap.parse_args()
     m = build()
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)

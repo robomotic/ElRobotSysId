@@ -61,13 +61,13 @@ RUN/FREEZE/RETURN/LEAVE. A moving joint coasts ~1° (one 30 ms command delay) an
 - **Stall test (2026-11-23):** src/stall.rs + `--stall J --into ±1 --lever-mm L [--stall-max 40]` (line-based, types
   grams per level; tare at offset 0; fit torque = k·i + b ∓ f by 3-parameter least squares). Not run on the arm yet.
   SimIo duty slope set to the real 0.42 %/tick (was 2.5).
-- **Stall boom (2026-11-23, user asked for a printable lever):** hardware/stall_boom.stl from
-  tools/make_stall_boom.py (trimesh + manifold3d): screws onto the camera mount in place of the U20CAM (mount STEP holes
-  Ø2.0, 33.8 mm square, on the seat that faces forward/24° up; slots fit 26–35 mm). Arm 100 mm sideways, leg 55 mm down,
-  nub R5. At level: nub ~139 mm above the table, lever ~99 mm about M7, lower M7 ticks press down (+x side). Safety:
-  `boom_spheres` (both sides) with payload "boom". **Withdrawn (user: the camera base is fragile):** the joint torque
-  (~0.85 N·m) would go through the camera mount (made for ~0.01 N·m). Stall test now: closed fingertips on the scale,
-  M6, --into 1, lever ~160 mm, --stall-max 20 default (170–270 g on the fingertips).
+- **Stall boom (2026-11-23):** first design on the camera mount withdrawn (user: the camera base is fragile; ~0.85 N·m
+  would have gone through it). **Now (user's idea): on the M8 horn, fingers off** — hardware/stall_boom_m8.stl from
+  tools/make_stall_boom.py: interface copied from norma-core Gripper_Gear (4 × M3 on Ø14, Ø7 centre, Ø23.5 × 3.15 recess,
+  2.85 mm flange: the gear's screws fit), 20 mm standoff tube (gripper base reaches y 57 mm, ±40 mm sideways; horn face
+  y ≈ 45), arm 100 mm. M8 axis = gripper y; at level 129 mm above the table. `boom_spheres` model it (payload "boom";
+  `--stall 8` adds them). Mark the gear's angle before removing it (gripper calibration). Not printed/run yet.
+  Alternative without printing: fingertips on M6 (--into 1, lever ~160 mm). --stall-max default 20.
 - **Electrical/thermal model (issue #2):** meta.toml decodes the protection registers; `--sim` servos have a DC motor
   model (R 4.4 Ω, Ke·N 2.5 V·s/rad); `--sim --cli` runs headless; `tools/fit_electrical.py` fits
   `|duty·V_bus − Ke·N·ω| = R·|i|` (the ST3215 current is a magnitude: never negative on the arm) and the supply-current

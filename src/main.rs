@@ -94,7 +94,7 @@ struct Cli {
     /// --target 2001,1750,2100,2450,1881,1869,2244
     #[arg(long, value_delimiter = ',')]
     target: Option<Vec<u16>>,
-    /// STALL TEST (issue #2): press a lever on this joint (1-7) into a kitchen scale at offsets 0..max..0 ticks and
+    /// STALL TEST (issue #2): press a lever on this joint (1-8; 8 = the boom on the M8 horn) into a kitchen scale at offsets 0..max..0 ticks and
     /// type the scale reading at each level. Line-based; asks [y/N] first. Needs --into and --lever-mm.
     #[arg(long)]
     stall: Option<u8>,
@@ -176,8 +176,9 @@ async fn main() -> Result<()> {
     }
 
     if let Some(joint) = cli.stall {
-        // Recommended set-up: the closed gripper's fingertips pressed onto the scale by M6 (no printed part); the boom
-        // counts only with --payload boom (not recommended on the camera mount: see README).
+        // M8 with the printed boom on its horn (fingers off) also models the boom; M6 with the fingertips needs nothing.
+        let mut sc_run = sc_run.clone();
+        sc_run.with_boom |= joint == 8;
         return run_stall(&cli, &cfg, &sc_run, joint).await;
     }
 

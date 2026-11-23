@@ -43,8 +43,8 @@ pub struct SafetyConfig {
     /// Set per run from the payload, not stored.
     #[serde(skip)]
     pub with_paddle: bool,
-    /// The printed stall-test boom (tools/make_stall_boom.py) on the camera seat, on either side: arm 100 mm sideways,
-    /// leg 55 mm down. Used with payload "boom" and always by the stall test.
+    /// The printed stall-test boom (tools/make_stall_boom.py) on the M8 horn in place of the gripper gear (fingers
+    /// off): arm 100 mm sideways at 20-28 mm in front of the horn, on either side. Used with payload "boom".
     pub boom_spheres: Vec<([f64; 3], f64)>,
     #[serde(skip)]
     pub with_boom: bool,
@@ -72,23 +72,17 @@ impl Default for SafetyConfig {
             // The Ø150 mm paddle beyond the jaws; its direction in the gripper frame is not measured, so it is large.
             paddle_spheres: vec![([0.0, 0.17, 0.0], 0.11)],
             with_paddle: false,
-            // Gripper_Base_v1_1 frame (m): seat centre (0.2, 16.4, 58.9) mm + 5 mm out, spheres every 25 mm along the
-            // arm and down the leg, both sides; r 16 mm covers the 14 x 10 mm section between spheres.
+            // Gripper_Base_v1_1 frame (m): M8 axis through (0.8, 45.2, -0.4) mm along +y; the arm is at y 65-73 mm,
+            // 14 mm tall (nub 5 mm below), out to 100 mm on either side. r 16 mm covers it between spheres.
             boom_spheres: vec![
-                ([0.0251, 0.0215, 0.0611], 0.016),
-                ([0.0501, 0.0219, 0.0614], 0.016),
-                ([0.0751, 0.0223, 0.0616], 0.016),
-                ([0.1001, 0.0228, 0.0618], 0.016),
-                ([0.1001, 0.0288, 0.0481], 0.016),
-                ([0.1002, 0.0368, 0.0298], 0.016),
-                ([0.1002, 0.0437, 0.0142], 0.016),
-                ([-0.0249, 0.0206, 0.0606], 0.016),
-                ([-0.0499, 0.0201, 0.0604], 0.016),
-                ([-0.0749, 0.0197, 0.0601], 0.016),
-                ([-0.0999, 0.0193, 0.0599], 0.016),
-                ([-0.0998, 0.0253, 0.0461], 0.016),
-                ([-0.0998, 0.0333, 0.0278], 0.016),
-                ([-0.0998, 0.0402, 0.0123], 0.016),
+                ([0.025, 0.069, -0.002], 0.016),
+                ([0.050, 0.069, -0.002], 0.016),
+                ([0.075, 0.069, -0.002], 0.016),
+                ([0.100, 0.069, -0.002], 0.016),
+                ([-0.025, 0.069, -0.002], 0.016),
+                ([-0.050, 0.069, -0.002], 0.016),
+                ([-0.075, 0.069, -0.002], 0.016),
+                ([-0.100, 0.069, -0.002], 0.016),
             ],
             with_boom: false,
             // From the station viewer mapping, angle = lower + (tick - range_min)/(range_max - range_min)*(upper - lower),

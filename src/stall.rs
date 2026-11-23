@@ -120,9 +120,9 @@ fn solve3(mut a: [[f64; 3]; 3], mut y: [f64; 3]) -> Option<[f64; 3]> {
 }
 
 /// Checks the sweep before anything moves: table clearance and calibrated range for base ± the largest offset.
-pub fn check(sc: &SafetyConfig, base: &[u16; 7], o: &StallOpts) -> Result<()> {
-    if !(1..=7).contains(&o.joint) {
-        bail!("stall test: joint must be 1-7");
+pub fn check(sc: &SafetyConfig, base: &[u16; 7], m8: u16, o: &StallOpts) -> Result<()> {
+    if !(1..=8).contains(&o.joint) {
+        bail!("stall test: joint must be 1-8");
     }
     if o.into != 1 && o.into != -1 {
         bail!("--into must be +1 or -1 (which way presses the lever into the scale)");
@@ -132,8 +132,17 @@ pub fn check(sc: &SafetyConfig, base: &[u16; 7], o: &StallOpts) -> Result<()> {
     }
     let j = o.joint as usize - 1;
     let reach = o.max_offset as f64 + SLIP_TICKS as f64;
-    if sc.range_room(j, base[j]) < reach {
-        bail!("M{}: {} ticks to the end of its calibrated range, the test needs {reach:.0}", o.joint, sc.range_room(j, base[j]));
+    let here = if j == 7 { m8 } else { base[j] };
+    if sc.range_room(j, here) < reach {
+        bail!("M{}: {} ticks to the end of its calibrated range, the test needs {reach:.0}", o.joint, sc.range_room(j, here));
+    }
+    if j == 7 {
+        // M8 (the boom on the horn, fingers off) does not move the arm: no table sweep, but the arm must be clear now.
+        return match safety::clearance(sc, base) {
+            None => bail!("table height not set"),
+            Some(c) if c < sc.margin_m => bail!("the arm is {:.0} mm above the table, margin {:.0} mm", c * 1e3, sc.margin_m * 1e3),
+            _ => Ok(()),
+        };
     }
     match safety::sweep_clearance(sc, base, j, reach) {
         None => bail!("table height not set"),
@@ -155,14 +164,14 @@ pub async fn run<I: Io>(
             bail!("servo M{id} does not answer (station still running?)");
         }
     }
-    let present = io.read_positions(&[1, 2, 3, 4, 5, 6, 7]).await?;
+    let present = io.read_positions(&[1, 2, 3, 4, 5, 6, 7, 8]).await?;
     let mut base = [0u16; 7];
-    base.copy_from_slice(&present);
-    check(sc, &base, o)?;
+    base.copy_from_slice(&present[..7]);
+    check(sc, &base, present[7], o)?;
     io.hold_present(None).await?;
     let id = o.joint;
-    let j = id as usize - 1;
-    let b = base[j] as i32;
+    let start = present[id as usize - 1];
+    let b = start as i32;
     let mut points = Vec::new();
     let mut tare = None;
     let mut prev = 0;
@@ -217,8 +226,8 @@ pub async fn run<I: Io>(
         Ok(())
     }
     .await;
-    // Always back to base (releases the scale).
-    io.write_goals(&[(id, base[j])]).await?;
+    // Always back to the start position (releases the scale).
+    io.write_goals(&[(id, start)]).await?;
     tokio::time::sleep(Duration::from_millis(800)).await;
     result?;
     Ok(points)
@@ -291,8 +300,10 @@ mod tests {
         let sc = SafetyConfig { table_z_m: Some(0.0), ..Default::default() };
         let base = [2001, 1042, 2051, 3160, 1881, 1869, 2244];
         let o = |joint, max| StallOpts { joint, into: 1, lever_m: 0.1, max_offset: max };
-        assert!(check(&sc, &base, &o(7, 40)).is_ok());
-        assert!(check(&sc, &base, &o(4, 40)).unwrap_err().to_string().contains("calibrated range"), "M4 at 3160");
-        assert!(check(&sc, &base, &o(7, 80)).is_err(), "offset cap");
+        assert!(check(&sc, &base, 2018, &o(7, 40)).is_ok());
+        assert!(check(&sc, &base, 2018, &o(4, 40)).unwrap_err().to_string().contains("calibrated range"), "M4 at 3160");
+        assert!(check(&sc, &base, 2018, &o(7, 80)).is_err(), "offset cap");
+        assert!(check(&sc, &base, 2018, &o(8, 20)).is_ok(), "M8 with the boom on the horn");
+        assert!(check(&sc, &base, 1240, &o(8, 20)).unwrap_err().to_string().contains("calibrated range"), "M8 near 1237");
     }
 }

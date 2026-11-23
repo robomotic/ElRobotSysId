@@ -224,16 +224,36 @@ and voltage have short glitches (1–4 samples, e.g. 26 → 99 °C during motion
    reading in grams. Fit: `torque = Kt·η·N·i_motor + b ∓ friction` (up/down), written to
    `sysid_logs/<stamp>_stall_M<n>/stall.{csv,toml}`. Checked first: table clearance and range over the sweep; stops
    above 30 % duty or if the joint runs > 15 ticks past its goal (the lever slipped).
-   **Recommended set-up: the fingertips, M6 (no printed part).** Close the gripper; put the kitchen scale on a stack so
-   the closed fingertips just touch it at the level pose (~125 mm above the table, ~190 mm in front of the base).
-   Higher M6 ticks press down (`--into 1`); the lever is the horizontal distance from the M6 axis to the fingertip
-   contact, ~160 mm (measure it). With the default `--stall-max 20` the fingertips push 1.7–2.6 N (170–270 g), like
-   holding a light object at the tips:
+   **Set-up A (recommended): a printed boom on the M8 horn, fingers off.** The horn carries the servo's full torque
+   by design, so the load goes straight into the servo and nothing fragile is in between.
+
+   ![Stall boom for the M8 horn: hub with a 20 mm standoff tube, arm 100 mm, nub underneath](docs/plots/stall-boom-m8.png)
+
+   | | |
+   |---|---|
+   | File | [`hardware/stall_boom_m8.stl`](hardware/stall_boom_m8.stl), made by `tools/make_stall_boom.py` |
+   | Interface | copied from norma-core `Gripper_Gear`: 4 × Ø3.4 holes on a Ø14 circle, Ø7 centre, Ø23.6 × 3.15 mm recess over the horn, 2.85 mm under the screw heads, so **the gear's own 4 M3 screws fit** |
+   | Standoff | tube Ø34/Ø22, 20 mm: the gripper base reaches 12 mm in front of the horn and ±40 mm sideways; the Ø22 bore lets a screwdriver reach the screws from the front |
+   | Arm | 100 mm from the axis to the nub, 14 × 8 mm; nub R 5 mm on the lower edge |
+   | Print | PETG or PLA, arm face down on the bed, 100 % infill (or 6 walls); ~34 g |
+
+   1. **Mark the gear's angle on the horn**, then unscrew its 4 M3 screws (the horn stays on the servo); the jaws come
+      off with the gear. Putting the gear back at the same angle keeps the station's gripper calibration valid.
+   2. Screw the boom on with the same screws, arm pointing sideways (the hole pattern allows 90° steps), nub down.
+   3. At the level pose the M8 axis is ~129 mm above the table, the nub's lowest point ~117 mm: put the kitchen scale
+      on a stack so the nub just touches it. Measure the lever (horizontal distance from the M8 axis to the nub's
+      contact), ~100 mm.
+   4. On the Pose screen, step M8 by 1–5 ticks to see which direction presses the nub down (`--into`); use payload
+      `boom` in the app while it is on.
+   5. `elrobot-sysid --config ~/paddle-ws/paddle.toml --stall 8 --into <±1> --lever-mm 100`
+
+   **Set-up B (no print): the fingertips on M6.** Close the gripper; put the scale under the fingertips at level
+   (~125 mm above the table, ~190 mm in front of the base). Higher M6 ticks press down (`--into 1`); lever ~160 mm:
    `elrobot-sysid --config ~/paddle-ws/paddle.toml --stall 6 --into 1 --lever-mm 160`.
 
-   ⚠ **Do not use the printed boom (`hardware/stall_boom.stl`) on the camera mount.** It screws onto the camera seat,
-   so the whole joint torque (up to ~0.85 N·m at 40 ticks) would go through the mount's thin post, its snap fit and
-   four M2 self-tapping screws, which are made for a 14 g camera (~0.01 N·m). Kept only as a geometry reference.
+   With the default `--stall-max 20` the motor puts out ≤ ~0.4–0.85 N·m (depending on the true Kt·η·N).
+   A first boom design on the camera mount was **withdrawn**: the camera base is fragile and would have carried the
+   whole joint torque.
 8. Validate by replaying logged goal sequences, from these runs and from PingPongSimBot runs, in sim and comparing positions.
 
 ## License
