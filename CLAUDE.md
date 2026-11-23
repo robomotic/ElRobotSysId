@@ -1,150 +1,91 @@
 # CLAUDE.md: ElRobotSysId
 
-Context for continuing this work in a new session. README.md has the tests, options, output format and the MuJoCo plan.
+Context for continuing this work in a new session. README.md has the overview, options and tools;
+docs/SERVO_MODEL.md has the registers, equations, parameters, validation and the MuJoCo/Unity implementations;
+data/sysid_runs/README.md lists the real runs.
 
 ## What this is
-`elrobot-sysid`: a Rust CLI that identifies the ElRobot follower's ST3215 servos one joint at a time (hold, steps, reversals,
-ramp, chirp) at the full bus rate, for a MuJoCo model (RoboSim #69 Phase 1, sim2real2sim). Sibling repo:
-robomotic/PingPongSimBot (ball balancing). Its findings motivated this tool: ~150 ms servo lag and ~20 ticks of tracking error
-on M6 cause a 1 Hz limit cycle.
+System identification of the ElRobot follower's ST3215 servos (RoboSim #69, sim2real2sim) and a servo model for MuJoCo
+(Python, `tools/`) and Unity (C#, `unity/`). Motivated by PingPongSimBot (~150 ms servo lag, 1 Hz limit cycle on M6).
+- `src/` (Rust, runs on the Pi): `elrobot-sysid`. tui.rs (Setup/Running/Results, Pose screen), session.rs (plan,
+  run_session on any `Io`, summaries, clearance rows), io.rs (`Io`: Bus + SimIo), bus.rs (serial), safety.rs (FK,
+  spheres, clearance, ranges), jog.rs (Pose screen bus task), stall.rs (stall test), settings.rs (paddle.toml subset).
+- `tools/` (Python 3.8+, numpy; MuJoCo ones need `~/.pyenv/versions/antifake/bin/python3`, mujoco 3.2.3; not on the
+  Pi): fit_electrical, fit_torque, find_load_pose, servo_sim (step loop, replay, heat), replay_stats,
+  make_replay_video, make_stall_boom, params_file (TOML), tests.
+- `unity/`: St3215Servo.cs (model + TOML loading), ElRobotServoDriver.cs (MjScene glue like RoboSim's
+  BipedServoDriver; compile in Unity), St3215Servo.Check (`dotnet run --project unity/St3215Servo.Check`, 19 checks).
+- Config: `sysid_safety.toml` (calibrated safety set-up, committed for other users), `servo_params.toml` (fitted
+  parameters, `[default]` + `[servo.Mn]`, written by the fitters with `--write-params`).
 
-## Full-screen app (2026-11-20)
-`elrobot-sysid` (no args) = TUI, `--sim` = simulated servos (src/io.rs SimIo), `--cli` = line-based run, `--dry-run`.
-Code: src/session.rs (plan, run_session on any `Io`, summaries, clearance rows, events), src/io.rs (`Io` trait: Bus +
-SimIo), src/tui.rs (Setup with live safety per joint, Running with goal-vs-position chart, Results table).
-Screenshots in docs/screenshots (regenerate with PingPongSimBot/tools/tui_drive.py `p:` steps). SimIo timing is set
-from the real wrist run (80 ms delay, tau 80 ms); the screenshots predate that (they show dead 32 ms).
+## State (2026-11-23)
+- Five real runs in `data/sysid_runs/` (wrist ±50; M2–M4 ±25 folded; M7 ±150; M2–M4 ±50 and ±75 at the load pose
+  M2 1750 / M3 2100 / M4 2450). The ±25 run had UI stalls (fixed: runs and the Pose task have their own thread).
+- Measured: R 4.04–4.17 Ω (standstill under load), Ke·N 1.5–2.0 V·s/rad (R fixed), Kt·η·N 1.6–1.8 N·m/A and static
+  friction 0.26/0.31/0.41 N·m on M2/M3/M4 (two-sided ramp holds + MuJoCo gravity; M4's are lower bounds), duty
+  0.42 %/tick (P 16), duty cap 50 %, dead zone ~4 ticks, apparent dead time 65–110 ms.
+- **The current register is the SUPPLY current** |duty|·|i_motor|, magnitude only. Load = duty, sign opposite to speed.
+  Gravity-loaded holds read zero load: the gearbox carries the arm by stiction.
+- MuJoCo model validated on held-out runs: 0.30–0.37° RMS on M2/M3/M4/M7. Weak spots: ~3-tick gravity offset on M3,
+  the step rise (the firmware's duty grows like √error: target rate limiting, not modelled), one friction per joint
+  (it is load-dependent: ~0.3 loaded, 0.02–0.05 unloaded wrist). Videos in docs/videos, tables in docs/stats.
+- MuJoCo pitfalls: the URDF meshes overlap by up to 28 mm (contacts off); default frictionloss creeps under load
+  (dof_solref 0.002, solimp 0.99/0.999/0.001, noslip 10).
+- Open: stall test (code done, not run: boom on the M8 horn `hardware/stall_boom_m8.stl` or fingertips on M6),
+  12 V torque mismatch (fitted values imply ~5 N·m vs datasheet 2.94), thermal test, load-dependent friction (#2).
+- **BAM calibration (#3, #4):** bench pendulum test of one spare ST3215 (D=0 and I=0 in RAM, P sweep, 12 V) for
+  Kt/R/Ke/armature without the URDF masses; the leader's ST-3215-C046 (7.4 V, 1:147) too. **The user is still printing
+  the pendulum: don't write the bench mode until they say so.** Upstream BAM's STS3215 profile is 7.4 V/1:345 with a
+  5 ms command delay: our "dead time" is probably mostly stiction + target rate limiting.
+- The withdrawn camera-mount boom: the camera base is fragile (user); never load it.
+- Prebuilt release v0.2.1 predates the calibration, Pose screen, stall test and thread fix.
 
-**Safety additions (user, 2026-11-20):** the paddle is NOT on the arm during sysid (payload defaults to `none`; the
-paddle spheres are added only for payload "paddle…"). The wrist camera IS always on: it's in `tool_spheres` (42 mm
-sphere on top of the gripper, fitted to RoboSim's CAD-registered U20CAM boxes; 27 mm mount, 24×35×67 mm body).
-**Pose screen (2026-11-22, user: "I hate restarting the norma station for just moving the arm"):** `p` in Setup;
-src/jog.rs owns the bus in a task (JogCmd Nudge/GoTo/Freeze/Close → JogMsg State/Info/Warn/Closed). Checks every step:
-calibrated range ± 5 ticks (`SafetyConfig::range_min/max`, `RANGE_TOL_TICKS`; the taught level has M2 at 1002 < 1004)
-and `safety::path_clearance`; runtime freeze below the margin. Runs also refuse sweeps past the range. The arm is
-folded at level: raising M2 alone swings the gripper DOWN (M2 1020 → 57 mm, 1100 → 38, 1200 → 15 mm).
-SAFETY STOP: Space in the app freezes (goal = present, torque on), then r = return slowly, q = leave; `session::ctl`
-RUN/FREEZE/RETURN/LEAVE. A moving joint coasts ~1° (one 30 ms command delay) and settles in its dead zone.
-
-## Status (2026-11-21)
-- **First real run: wrist M5–M7, ±50 ticks, nothing attached** (`sysid_logs/1795303354_none` on the Pi; copy in the
-  session scratchpad only). ~2 kHz sampling, but 79 % of samples repeat (servo refreshes every ~1–2 ms). Dead time 70–100 ms
-  outward, 80–145 ms back to base; t63 110–210 ms; slop M5 9, M6 17, M7 9 ticks; M6 stops ~10 ticks short going negative.
-  Servo registers: Max Torque 500 (duty cap 50 %), P 16, protection current 500 (3.25 A), overload 25 % for 2 s → 20 %.
-- **Second real run (2026-11-22): M2–M4, ±25 ticks, from M2 1042** (`sysid_logs/1795347460_none`). dead 78/100/108 ms,
-  slop 3.8/17/14.5 ticks, M4 steady miss 20. **Holds read load 0 and 0 mA** on M2–M4: the gearbox holds the static gravity
-  load by friction, so holds cannot give Kt·η (use up/down ramp asymmetry instead). Duty ≈ 0.4 % per tick of error (P 16),
-  so ±25-tick tests reach only ~12 % duty and < 75 mA: too little for the electrical fit; it needs steps of ~100+ ticks
-  (e.g. on a wrist roll joint, where the sweep stays clear). The app stalled 26/77/97 s (UI and run shared one thread; a
-  blocked SSH terminal stops both): fixed, runs and the Pose task now have their own thread (stall test: 9.5 s gap → 4 ms).
-- **Third real run (2026-11-23): M7 alone, amplitude 150** (steps to ±100, `sysid_logs/1795366217_none`): dead 78 ms,
-  t63 171 ms, slop 4.8; |load| ≤ 17.6 %, current ≤ 46 mA (mean 6 mA while moving). **Ke·N from duty·V_bus vs speed:**
-  M7 2.54/2.53 (two runs), M2 2.95, M3 2.80, M5 3.08, M6 2.93 V·s/rad (corr ~0.95); load sign is opposite to speed.
-  R still unidentified (needs ≥ 150 mA): fitter falls back to the datasheet 4.4 Ω.
-- **Fourth run (2026-11-23): M2–M4 ±50 at the load pose** (`sysid_logs/1795395590_none`, base 2000 1753 2103 2482).
-  **The reported current is the SUPPLY current, |duty|·i_motor**: standstill R = 4.17/4.04/4.17 Ω (median; IQR ~3.8–4.4).
-  With R fixed, Ke·N 1.6–2.0 V·s/rad on all runs (the earlier 2.5–3.1 "motion only" values were biased: the motor
-  current is ~10× the reported one). Two-sided holds + MuJoCo gravity: Kt·η·N 1.69/1.62/1.84 N·m/A, static friction
-  0.25/0.30/0.41 N·m (M2/M3/M4). Open: these imply ~5 N·m at 12 V vs the datasheet's 2.94 (URDF masses? datasheet?).
-  SimIo reports supply current too. The Kt script was ad hoc (scratchpad loadpose/kt.py), not in the repo yet.
-- **Load pose for R (2026-11-23, MuJoCo search on the norma-core URDF, arm 0.62 kg):** M2 1750, M3 2100, M4 2450
-  (others as now): arm half upright, gripper forward ~200 mm, 91 mm above the table; gravity M2/M3/M4 0.31/0.48/0.42 N m.
-  Reach it with the Pose screen `g` (`--target 2001,1750,2100,2450,1881,1869,2244`): straight path never below 51 mm,
-  back to level ≥ 85 mm. Moving M2 alone first would hit the table (the Pose screen refuses it). Search scripts were
-  in the session scratchpad (loadpose/search*.py), not in the repo.
-- **MuJoCo servo step loop (2026-11-23):** tools/servo_sim.py (+ elrobot_model.py, fit_torque.py, test_servo_sim.py;
-  run with ~/.pyenv/versions/antifake/bin/python3, mujoco 3.2.3; not on the Pi). Pitfalls found: URDF meshes overlap
-  (contacts off), MuJoCo frictionloss creeps under sustained load (dof_solref 0.002, solimp 0.99/0.999, noslip 10).
-  Replay fits: M2 4.2, M3 4.5, M4 2.9, M7 4.9 ticks RMS; kp_duty from the log (0.0042/tick M2–M4, 0.0021 M7).
-  Friction is load-dependent (0.3 loaded, 0.05 unloaded wrist): next model step. User (2026-11-23): printed parts make
-  the URDF masses uncertain → add a stall test against a kitchen scale (torque without masses).
-- **Stall test (2026-11-23):** src/stall.rs + `--stall J --into ±1 --lever-mm L [--stall-max 40]` (line-based, types
-  grams per level; tare at offset 0; fit torque = k·i + b ∓ f by 3-parameter least squares). Not run on the arm yet.
-  SimIo duty slope set to the real 0.42 %/tick (was 2.5).
-- **Stall boom (2026-11-23):** first design on the camera mount withdrawn (user: the camera base is fragile; ~0.85 N·m
-  would have gone through it). **Now (user's idea): on the M8 horn, fingers off** — hardware/stall_boom_m8.stl from
-  tools/make_stall_boom.py: interface copied from norma-core Gripper_Gear (4 × M3 on Ø14, Ø7 centre, Ø23.5 × 3.15 recess,
-  2.85 mm flange: the gear's screws fit), 20 mm standoff tube (gripper base reaches y 57 mm, ±40 mm sideways; horn face
-  y ≈ 45), arm 100 mm. M8 axis = gripper y; at level 129 mm above the table. `boom_spheres` model it (payload "boom";
-  `--stall 8` adds them). Mark the gear's angle before removing it (gripper calibration). Not printed/run yet.
-  Alternative without printing: fingertips on M6 (--into 1, lever ~160 mm). --stall-max default 20.
-- **servo_params.toml (issue #5, 2026-11-23):** fitted parameters per joint (`[default]` + `[servo.Mn]`), read by
-  tools/servo_sim.py (`ServoParams.from_file`), tools/elrobot_model.py (calibration from sysid_safety.toml) and
-  unity/St3215Servo.cs (`St3215Params.Load`, `LoadCalibration`); written by the fitters with `--write-params`
-  (tools/params_file.py keeps comments). Tests: tools/test_params_file.py, unity/St3215Servo.Check (19 checks).
-- Open issues: #3 BAM bench calibration of one follower servo (pendulum not printed yet; upstream BAM's STS3215
-  profile is 7.4 V/1:345, fitted command delay 5 ms → our 70–100 ms "dead time" is probably stiction + the firmware's
-  target rate limiter, still to add to servo_sim.py), #4 the same for the leader's ST-3215-C046 (7.4 V, 1:147).
-- **Electrical/thermal model (issue #2):** meta.toml decodes the protection registers; `--sim` servos have a DC motor
-  model (R 4.4 Ω, Ke·N 2.5 V·s/rad); `--sim --cli` runs headless; `tools/fit_electrical.py` fits
-  `|duty·V_bus − Ke·N·ω| = R·|i|` (the ST3215 current is a magnitude: never negative on the arm) and the supply-current
-  alternative. Temperature/voltage glitch for 1–4 samples (26 → 99 °C): 51-sample median. Wrist currents < 60 mA are too
-  small to fit (flagged); needs M2–M4. Open: Kt·η from gravity torques at holds, thermal test, MuJoCo step loop.
-- **BAM calibration (issue #3, 2026-11-23):** a bench pendulum test of one spare ST3215 (D=0 and I=0 in RAM, P sweep, 12 V)
-  for Kt/R/Ke/armature without the URDF masses; friction is refitted per joint on the arm logs. The user is still printing
-  the pendulum: don't write the bench mode until they say so.
-- Elrobot-sysid on the Pi: `~/.local/bin/elrobot-sysid` links to the release build; run it from `~/ElRobotSysId` (it reads
-  `sysid_safety.toml` and writes `sysid_logs/` in the current folder).
-- Next: a Python fitter (per joint: dead time + first-order lag + kp/damping/frictionloss,
-  then a check against the chirp), then the MuJoCo actuator parameters.
-
-## Requirement: safety area (table) before any further run (user, 2026-11-20)
-The arm sits on a table and **must never hit it**. The per-joint excursion cap (`--max-amp`) is not enough: a shoulder or
-elbow move of a few degrees swings the paddle or gripper a long way. Before sysid runs on the arm (and on M1–M4 in
-particular), add a workspace safety check (GitHub issue #1):
-- full forward kinematics with positions (URDF joint origins, not only the axes) for the gripper, the paddle rim and the
-  elbow/wrist links;
-- a configurable keep-out region: table plane height plus margin (and optionally a box around the base or other obstacles);
-- **before moving:** check the base pose and every extreme of the planned signal for each joint; refuse joints/amplitudes
-  that would enter the keep-out region, and say by how much;
-- **while running:** stop and return to base if the measured pose comes within the margin;
-- the table height must be measured or taught (e.g. jog the gripper down to just above the table and record it), not guessed.
-
-**Progress on the safety area (2026-11-20):** `src/safety.rs` (FK with URDF positions, tool spheres, sweep clearance,
-safe amplitude) is wired into the CLI (`--set-table-z-mm`, `--show-clearance`, dry-run report, refusal before any servo
-write, path check to the base pose, runtime stop). 3 unit tests.
-**Calibrated 2026-11-21 with the user:** sign +1, zeros from the station viewer mapping (URDF limits + follower ranges in
-PingPongSimBot tools/throw_sim.py), matched at level; the viewer matches the real arm at level. Table at 0 mm (base clamped
-on the table; the base mesh starts at z = 0; the table edge runs along the base, the model's infinite plane is
-conservative). Camera sphere from RoboSim's CAD-registered U20CAM boxes (on top of the gripper, +z of Gripper_Base_v1_1).
-Ruler: gripper motor centre ~114 mm vs model 108; lowest gripper point ~80 mm vs spheres 56 mm. Same values are the code
-defaults and in the repo's commented `sysid_safety.toml` (committed 2026-11-23 for other users; table_z_m = 0). Sign check confirmed by the user
-(2026-11-22): the viewer arm turns the same way as the real one for M2–M4. Next: M2–M4 run at `--max-amp 30` (dry-run
-first), when the user is back.
+## Safety facts (issue #1, closed; all enforced in src/safety.rs, jog.rs, session.rs)
+- Tick → angle: sign +1, zeros 2050.3 2053.0 2051.3 2053.0 1842.7 1924.5 2198.6 (station viewer mapping, checked with
+  the viewer, a ruler and the joint directions). Not `zero 2048, sign −1`.
+- Calibrated ranges ± 5 ticks (min 1087 1004 935 900 141 1040 134 1237, max 3009 3092 3161 3196 3955 3056 3962
+  2859); the servos' own angle limits are 0–4095. The taught level pose has M2 at 1002 (2 ticks below its range).
+- Table at 0 mm (base clamped on the table; the table edge runs along the base, the infinite plane is conservative),
+  margin 30 mm. Spheres: gripper motor, jaws, wrist camera (42 mm, on top of the gripper, from RoboSim's CAD), paddle
+  (payload paddle…), stall boom (payload boom, `--stall 8`).
+- The arm is folded at level: raising M2 alone swings the gripper DOWN (M2 1020 → 57 mm, 1100 → 38, 1200 → 15 mm).
+  Use `--target` + `g` (straight path checked) or `l`.
+- Blocked-joint stop at 90 % of the duty cap (450 here; the old 900 could never fire). Freeze = goal ← present, torque
+  on; a moving joint coasts ~1° (servo response delay ~80 ms).
+- The app reads `sysid_safety.toml` from the current folder: run it from `~/ElRobotSysId`.
 
 ## Hardware and access
-- Pi "NormaStation" (Pi 4, Debian 13): `ssh robomotic@normastation.local`. If mDNS fails (Wi-Fi drops), use the LAN IP
-  (192.168.68.56 on 2026-11-19; may change). Passwordless sudo works.
-- Stop the station before running: `sudo systemctl stop normacore-station`; start it again afterwards. Servo torque stays on
-  when it stops.
-- Follower bus: CH343 serial `5B14033257` (`/dev/ttyACM1`, use the by-id path; that's the default). Leader: `5B14112350`.
-- Build dependencies on the Pi: rustup toolchain, `protobuf-compiler`, `libudev-dev`.
-- `--config` can point at PingPongSimBot's `paddle.toml` (on the Pi: `~/paddle-ws/paddle.toml`) for the level pose
-  `2003 1002 1942 3185 1864 1892 2226 1440` and grip 1396.
+- Pi "NormaStation" (Pi 4, Debian 13): `ssh robomotic@normastation.local`; if mDNS fails, the LAN IP (192.168.68.56
+  on 2026-11-19; may change). Passwordless sudo. `~/.local/bin/elrobot-sysid` links to the release build.
+- Stop the station before running (`sudo systemctl stop normacore-station`; torque stays on), start it afterwards.
+- Follower bus: CH343 `5B14033257` (by-id path is the default). Leader: `5B14112350`.
+- Build on the Pi: `bash ~/pp-build.sh` (pulls and builds PingPongSimBot and this repo; log ~/pp-build.log); needs
+  rustup, `protobuf-compiler`, `libudev-dev`. Long builds over SSH: `nohup … &` with an exit marker; no `pgrep -f`.
+- `--config ~/paddle-ws/paddle.toml` (PingPongSimBot) gives the level pose `2003 1002 1942 3185 1864 1892 2226 1440`
+  and grip 1396.
+- MuJoCo tools need the norma-core URDF at `~/DevOps/norma-core/hardware/elrobot/simulation/` (`ELROBOT_URDF`).
 
 ## Working agreements with the user
-- **Never move the arm without the user's explicit OK** at that moment. Say which joints move and by how much.
-  `--dry-run` is always fine.
-- The user runs interactive commands in their own SSH terminal and pastes the output. This tool asks [y/N] unless `--yes`.
-- For M1–M4, take the paddle off first and use a smaller `--max-amp` (e.g. 50): those joints carry the whole arm.
-- Long builds over SSH: `nohup … &` plus an exit marker in a log. Don't use `pgrep -f` over SSH (it matches itself).
+- **Never move the arm without the user's explicit OK** at that moment. Say which joints move, by how much, and why
+  it's safe. `--dry-run` and read-only reads are fine.
+- The user runs interactive commands in their own SSH terminal and pastes the output.
+- Nothing attached to the gripper unless the user says so (the wrist camera is always on). For M1–M4 use a small
+  `--max-amp` (25–75 so far) and check clearance first.
+- Commit/push when asked.
 
 ## Code notes
-- `src/bus.rs` is a copy of PingPongSimBot's bus module (`read_torque_enabled` dropped). Keep fixes in sync, or extract a shared
-  crate if more tools appear.
-- `src/settings.rs` reads only `[bus].port`, `[bus].timeout_ms`, `[poses].level` and `[poses].grip` from a paddle.toml;
-  everything else in that file is ignored.
+- `src/bus.rs` is a copy of PingPongSimBot's bus module (`read_torque_enabled` dropped): keep fixes in sync.
+- `src/settings.rs` reads only `[bus].port`, `[bus].timeout_ms`, `[poses].level` and `[poses].grip` from paddle.toml.
 - Test signals: `plan()` builds `Segment`s; `Segment::offset(t)` gives ticks from base. Summaries: `step_stats`,
   `reversal_slop`.
-- Feetech encodings: speed and current are sign-magnitude in bit 15; load has its sign in bit 10.
+- Feetech encodings: speed sign-magnitude in bit 15; load sign in bit 10; current is a magnitude (6.5 mA units).
+  The `st3215` crate labels EEPROM 0x12/0x13 one off (0x13 = unload condition, 44).
+- Screenshots: regenerate with PingPongSimBot/tools/tui_drive.py `p:` steps (app 130×40, dry runs 120×53, `--sim`
+  with the repo's sysid_safety.toml).
 
 ## Releases
-All built on the Pi, stripped, `.sha256` attached (asset `elrobot-sysid-aarch64-linux`), tag at the built commit;
-the binary needs glibc ≥ 2.39.
-- v0.1.0 (2026-11-20, `3036410`): line-based CLI with the table safety area.
-- v0.2.0 (2026-11-20, `effa4e0`): full-screen app (Setup/Running/Results), `--sim` simulated servos, `--cli`.
-- v0.2.1 (2026-11-20, `5a35680`, latest): SAFETY STOP (Space), wrist camera always in the safety model, payload
-  defaults to `none`.
-To repeat: on the Pi `bash ~/pp-build.sh` (pulls and builds both repos, log in ~/pp-build.log), then `strip` a copy, run
-`sha256sum`, scp it down, and `gh release create vX.Y.Z --target <full sha> --notes-file ... <binary> <binary>.sha256`.
-Check the minimum glibc with `objdump -T <bin> | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1`.
+Built on the Pi, stripped, `.sha256` attached (asset `elrobot-sysid-aarch64-linux`), tag at the built commit; needs
+glibc ≥ 2.39. v0.1.0 (`3036410`, line-based CLI + table safety), v0.2.0 (`effa4e0`, full-screen app, `--sim`),
+v0.2.1 (`5a35680`, SAFETY STOP, camera in the safety model). To repeat: `bash ~/pp-build.sh` on the Pi, `strip` a
+copy, `sha256sum`, scp it down, `gh release create vX.Y.Z --target <full sha> --notes-file … <bin> <bin>.sha256`;
+check the minimum glibc with `objdump -T <bin> | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1`.

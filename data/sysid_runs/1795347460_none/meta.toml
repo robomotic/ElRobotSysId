@@ -1,0 +1,311 @@
+# elrobot-sysid run
+stamp = 1795347460
+payload = "none"
+port = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B14033257-if00"
+base_ticks = [2001, 1042, 2051, 3160, 1881, 1869, 2244]
+present_at_start = [2001, 1042, 2051, 3160, 1881, 1869, 2244, 2018]
+max_amp_ticks = 25
+acc = 0
+joints = [2, 3, 4]
+tests = [Hold, Steps, Reversals, Ramp, Chirp]
+grip = Some(1396)
+
+[safety]
+table_z_m = Some(0.0)
+margin_m = 0.03
+with_paddle = false
+spheres = [([0.0, 0.045, 0.0], 0.04), ([0.0, 0.1, 0.0], 0.05), ([0.0014, 0.0215, 0.0485], 0.042)]
+
+[servo.M1]
+model = 2563
+firmware = 0
+min_angle_limit = 0
+max_angle_limit = 4095
+max_temperature_c = 70
+max_voltage_dv = 140
+min_voltage_dv = 40
+max_torque = 500  # 0.1% units
+unloading_conditions = 0x2c  # bits: 0 voltage, 2 temperature, 3 current, 5 overload
+p_coef = 16
+d_coef = 0
+i_coef = 0
+min_startup_force = 16
+cw_dead_zone = 1
+ccw_dead_zone = 1
+protection_current = 500  # 6.5 mA units = 3250 mA
+offset = 63628
+mode = 0
+protective_torque = 20  # % of max, applied after a protection trips
+protection_time = 200  # 10 ms units, overload before tripping
+overload_torque = 25  # % of max that counts as overload
+overcurrent_protection_time = 200  # 10 ms units
+torque_enable = 1
+acc = 0
+goal_speed = 0
+torque_limit = 500
+eeprom_hex = "030a000903010000010000ff0f468c28f4010c2c2f10000010000101f401018cf80014c8190ac8c8"
+ram_0x28_hex = "0100d10700000000f401"
+
+[servo.M2]
+model = 2563
+firmware = 0
+min_angle_limit = 0
+max_angle_limit = 4095
+max_temperature_c = 70
+max_voltage_dv = 140
+min_voltage_dv = 40
+max_torque = 500  # 0.1% units
+unloading_conditions = 0x2c  # bits: 0 voltage, 2 temperature, 3 current, 5 overload
+p_coef = 16
+d_coef = 0
+i_coef = 0
+min_startup_force = 16
+cw_dead_zone = 1
+ccw_dead_zone = 1
+protection_current = 500  # 6.5 mA units = 3250 mA
+offset = 63582
+mode = 0
+protective_torque = 20  # % of max, applied after a protection trips
+protection_time = 200  # 10 ms units, overload before tripping
+overload_torque = 25  # % of max that counts as overload
+overcurrent_protection_time = 200  # 10 ms units
+torque_enable = 1
+acc = 0
+goal_speed = 0
+torque_limit = 500
+eeprom_hex = "030a000903020000010000ff0f468c28f4010c2c2f10000010000101f401015ef80014c8190ac8c8"
+ram_0x28_hex = "0100120400000000f401"
+
+[servo.M3]
+model = 2563
+firmware = 0
+min_angle_limit = 0
+max_angle_limit = 4095
+max_temperature_c = 70
+max_voltage_dv = 140
+min_voltage_dv = 40
+max_torque = 500  # 0.1% units
+unloading_conditions = 0x2c  # bits: 0 voltage, 2 temperature, 3 current, 5 overload
+p_coef = 16
+d_coef = 0
+i_coef = 0
+min_startup_force = 16
+cw_dead_zone = 1
+ccw_dead_zone = 1
+protection_current = 500  # 6.5 mA units = 3250 mA
+offset = 63656
+mode = 0
+protective_torque = 20  # % of max, applied after a protection trips
+protection_time = 200  # 10 ms units, overload before tripping
+overload_torque = 25  # % of max that counts as overload
+overcurrent_protection_time = 200  # 10 ms units
+torque_enable = 1
+acc = 0
+goal_speed = 0
+torque_limit = 500
+eeprom_hex = "030a000903030000010000ff0f468c28f4010c2c2f10000010000101f40101a8f80014c8190ac8c8"
+ram_0x28_hex = "0100030800000000f401"
+
+[servo.M4]
+model = 2563
+firmware = 0
+min_angle_limit = 0
+max_angle_limit = 4095
+max_temperature_c = 70
+max_voltage_dv = 140
+min_voltage_dv = 40
+max_torque = 500  # 0.1% units
+unloading_conditions = 0x2c  # bits: 0 voltage, 2 temperature, 3 current, 5 overload
+p_coef = 16
+d_coef = 0
+i_coef = 0
+min_startup_force = 16
+cw_dead_zone = 1
+ccw_dead_zone = 1
+protection_current = 500  # 6.5 mA units = 3250 mA
+offset = 1209
+mode = 0
+protective_torque = 20  # % of max, applied after a protection trips
+protection_time = 200  # 10 ms units, overload before tripping
+overload_torque = 25  # % of max that counts as overload
+overcurrent_protection_time = 200  # 10 ms units
+torque_enable = 1
+acc = 0
+goal_speed = 0
+torque_limit = 500
+eeprom_hex = "030a000903040000010000ff0f468c28f4010c2c2f10000010000101f40101b9040014c8190ac8c8"
+ram_0x28_hex = "0100580c00000000f401"
+
+[servo.M5]
+model = 2563
+firmware = 0
+min_angle_limit = 0
+max_angle_limit = 4095
+max_temperature_c = 70
+max_voltage_dv = 140
+min_voltage_dv = 40
+max_torque = 500  # 0.1% units
+unloading_conditions = 0x2c  # bits: 0 voltage, 2 temperature, 3 current, 5 overload
+p_coef = 16
+d_coef = 0
+i_coef = 0
+min_startup_force = 16
+cw_dead_zone = 1
+ccw_dead_zone = 1
+protection_current = 500  # 6.5 mA units = 3250 mA
+offset = 64085
+mode = 0
+protective_torque = 20  # % of max, applied after a protection trips
+protection_time = 200  # 10 ms units, overload before tripping
+overload_torque = 25  # % of max that counts as overload
+overcurrent_protection_time = 200  # 10 ms units
+torque_enable = 1
+acc = 50
+goal_speed = 0
+torque_limit = 500
+eeprom_hex = "030a000903050000010000ff0f468c28f4010c2c2f10000010000101f4010155fa0014c8190ac8c8"
+ram_0x28_hex = "0132590700000000f401"
+
+[servo.M6]
+model = 2563
+firmware = 0
+min_angle_limit = 0
+max_angle_limit = 4095
+max_temperature_c = 70
+max_voltage_dv = 140
+min_voltage_dv = 40
+max_torque = 500  # 0.1% units
+unloading_conditions = 0x2c  # bits: 0 voltage, 2 temperature, 3 current, 5 overload
+p_coef = 16
+d_coef = 0
+i_coef = 0
+min_startup_force = 16
+cw_dead_zone = 1
+ccw_dead_zone = 1
+protection_current = 500  # 6.5 mA units = 3250 mA
+offset = 63693
+mode = 0
+protective_torque = 20  # % of max, applied after a protection trips
+protection_time = 200  # 10 ms units, overload before tripping
+overload_torque = 25  # % of max that counts as overload
+overcurrent_protection_time = 200  # 10 ms units
+torque_enable = 1
+acc = 50
+goal_speed = 0
+torque_limit = 500
+eeprom_hex = "030a000903060000010000ff0f468c28f4010c2c2f10000010000101f40101cdf80014c8190ac8c8"
+ram_0x28_hex = "01324d0700000000f401"
+
+[servo.M7]
+model = 2563
+firmware = 0
+min_angle_limit = 0
+max_angle_limit = 4095
+max_temperature_c = 70
+max_voltage_dv = 140
+min_voltage_dv = 40
+max_torque = 500  # 0.1% units
+unloading_conditions = 0x2c  # bits: 0 voltage, 2 temperature, 3 current, 5 overload
+p_coef = 16
+d_coef = 0
+i_coef = 0
+min_startup_force = 16
+cw_dead_zone = 1
+ccw_dead_zone = 1
+protection_current = 500  # 6.5 mA units = 3250 mA
+offset = 65330
+mode = 0
+protective_torque = 20  # % of max, applied after a protection trips
+protection_time = 200  # 10 ms units, overload before tripping
+overload_torque = 25  # % of max that counts as overload
+overcurrent_protection_time = 200  # 10 ms units
+torque_enable = 1
+acc = 50
+goal_speed = 0
+torque_limit = 500
+eeprom_hex = "030a000903070000010000ff0f468c28f4010c2c2f10000010000101f4010132ff0014c8190ac8c8"
+ram_0x28_hex = "0132c40800000000f401"
+
+[servo.M8]
+model = 2563
+firmware = 0
+min_angle_limit = 0
+max_angle_limit = 4095
+max_temperature_c = 70
+max_voltage_dv = 140
+min_voltage_dv = 40
+max_torque = 500  # 0.1% units
+unloading_conditions = 0x2c  # bits: 0 voltage, 2 temperature, 3 current, 5 overload
+p_coef = 16
+d_coef = 0
+i_coef = 0
+min_startup_force = 16
+cw_dead_zone = 1
+ccw_dead_zone = 1
+protection_current = 500  # 6.5 mA units = 3250 mA
+offset = 1524
+mode = 0
+protective_torque = 20  # % of max, applied after a protection trips
+protection_time = 200  # 10 ms units, overload before tripping
+overload_torque = 25  # % of max that counts as overload
+overcurrent_protection_time = 200  # 10 ms units
+torque_enable = 1
+acc = 0
+goal_speed = 0
+torque_limit = 500
+eeprom_hex = "030a000903080000010000ff0f468c28f4010c2c2f10000010000101f40101f4050014c8190ac8c8"
+ram_0x28_hex = "0100e20700000000f401"
+
+[summary.M2]
+samples = 92777
+rate_hz = 1723
+hold_load = 0.0
+hold_current_ma = 0.1
+hold_goal_minus_present = 0.00
+steps = [
+  { segment = "step-10", amp = -10, dead_ms = 77.5, t63_ms = 124.3, overshoot_pct = 0.0, steady_err = 0.00 },
+  { segment = "step+25", amp = 25, dead_ms = 84.3, t63_ms = 145.4, overshoot_pct = 0.0, steady_err = 9.00 },
+  { segment = "step+25_back", amp = -25, dead_ms = 99.9, t63_ms = 237.9, overshoot_pct = 0.0, steady_err = 0.00 },
+  { segment = "step-25", amp = -25, dead_ms = 74.8, t63_ms = 140.1, overshoot_pct = 0.0, steady_err = -1.00 },
+  { segment = "step-25_back", amp = 25, dead_ms = 109.4, t63_ms = 246.9, overshoot_pct = 0.0, steady_err = 8.00 }
+]
+reversal_slop_ticks = [0.0, 15.0, 0.0, 0.0]
+reversal_slop_mean = 3.75
+ramp_peak_current_ma = 45.5
+ramp_max_goal_minus_present = 14.0
+
+[summary.M3]
+samples = 72342
+rate_hz = 605
+hold_load = 0.0
+hold_current_ma = 0.1
+hold_goal_minus_present = 0.00
+steps = [
+  { segment = "step-10", amp = -10, dead_ms = 99.9, t63_ms = NaN, overshoot_pct = 0.0, steady_err = -6.00 },
+  { segment = "step+25", amp = 25, dead_ms = 81.4, t63_ms = NaN, overshoot_pct = 0.0, steady_err = 15.00 },
+  { segment = "step+25_back", amp = -25, dead_ms = 119.0, t63_ms = NaN, overshoot_pct = 0.0, steady_err = -2.00 },
+  { segment = "step-25", amp = -25, dead_ms = 88.2, t63_ms = 153.3, overshoot_pct = 0.0, steady_err = -5.00 },
+  { segment = "step-25_back", amp = 25, dead_ms = 112.4, t63_ms = NaN, overshoot_pct = 0.0, steady_err = 6.00 }
+]
+reversal_slop_ticks = [18.0, 16.0]
+reversal_slop_mean = 17.00
+ramp_peak_current_ma = 26.0
+ramp_max_goal_minus_present = 13.0
+
+[summary.M4]
+samples = 62332
+rate_hz = 388
+hold_load = 0.0
+hold_current_ma = 0.1
+hold_goal_minus_present = 0.00
+steps = [
+  { segment = "step+25", amp = 25, dead_ms = 107.5, t63_ms = NaN, overshoot_pct = 0.0, steady_err = 20.00 },
+  { segment = "step+25_back", amp = -25, dead_ms = 300.1, t63_ms = NaN, overshoot_pct = 0.0, steady_err = -2.00 },
+  { segment = "step-25", amp = -25, dead_ms = 89.8, t63_ms = 176.7, overshoot_pct = 0.0, steady_err = -8.00 },
+  { segment = "step-25_back", amp = 25, dead_ms = 151.2, t63_ms = NaN, overshoot_pct = 0.0, steady_err = 12.00 }
+]
+reversal_slop_ticks = [29.0, 0.0]
+reversal_slop_mean = 14.50
+ramp_peak_current_ma = 71.5
+ramp_max_goal_minus_present = 19.0
+

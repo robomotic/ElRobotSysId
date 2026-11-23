@@ -245,11 +245,13 @@ screen moves the arm without the station with the same checks.
 
 ### 5.3 Pipeline
 
-1. `elrobot-sysid` (app or `--cli`) → `sysid_logs/<stamp>_<payload>/meta.toml` + `M<n>.csv` (t, segment, test, goal,
+1. `elrobot-sysid` (app or `--cli`) → `sysid_logs/<stamp>_<payload>/meta.toml` + `M<n>.csv` (the five real runs
+   behind this document are in [`data/sysid_runs/`](../data/sysid_runs); t, segment, test, goal,
    position, speed, load, current_ma, voltage_dv, temp_c).
 2. `tools/fit_electrical.py <session>`: sign convention, R at standstill under load, Ke·N with R fixed (§3.2, §3.4).
 3. `tools/fit_torque.py <session>`: Kt·η·N and static friction from the two-sided holds and MuJoCo gravity
-   (needs a gravity-loaded pose, e.g. M2 1750 / M3 2100 / M4 2450 reached with the Pose screen `g` and `--target`).
+   (needs a gravity-loaded pose, e.g. M2 1750 / M3 2100 / M4 2450, found with `tools/find_load_pose.py` and reached
+   with the Pose screen `g` and `--target`).
 4. `tools/servo_sim.py replay <session> --joint N --fit`: the full step loop in MuJoCo driven by the logged goals;
    fits dead zone and static friction; `heat` simulates a hold with protection and heating.
 5. `tools/replay_stats.py` and `tools/make_replay_video.py`: validation statistics and real-vs-sim videos (§6).
