@@ -58,8 +58,8 @@ struct Cli {
     /// Servo acceleration register during the tests (0 = servo maximum). Restored afterwards.
     #[arg(long, default_value_t = 0)]
     acc: u8,
-    /// What the arm carries: none (normal for system ID), paddle, paddle+ball. Goes into the folder name and meta;
-    /// "paddle…" also adds the paddle to the table safety model.
+    /// What the arm carries: none (normal for system ID), boom (the printed stall-test boom), paddle, paddle+ball. Goes
+    /// into the folder name and meta; "boom" and "paddle…" also add it to the table safety model.
     #[arg(long, default_value = "none")]
     payload: String,
     #[arg(long, value_enum, value_delimiter = ',', default_values_t = [Test::Hold, Test::Steps, Test::Reversals, Test::Ramp, Test::Chirp])]
@@ -176,7 +176,10 @@ async fn main() -> Result<()> {
     }
 
     if let Some(joint) = cli.stall {
-        return run_stall(&cli, &cfg, &sc_run, joint).await;
+        // The stall test always models the boom (on either side): conservative if it is the fingertips instead.
+        let mut sc_stall = sc_run.clone();
+        sc_stall.with_boom = true;
+        return run_stall(&cli, &cfg, &sc_stall, joint).await;
     }
 
     if cli.sim && !cli.dry_run {

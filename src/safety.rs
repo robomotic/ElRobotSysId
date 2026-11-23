@@ -43,6 +43,11 @@ pub struct SafetyConfig {
     /// Set per run from the payload, not stored.
     #[serde(skip)]
     pub with_paddle: bool,
+    /// The printed stall-test boom (tools/make_stall_boom.py) on the camera seat, on either side: arm 100 mm sideways,
+    /// leg 55 mm down. Used with payload "boom" and always by the stall test.
+    pub boom_spheres: Vec<([f64; 3], f64)>,
+    #[serde(skip)]
+    pub with_boom: bool,
     /// rad = sign * (tick - zero) * 2pi/4096 for M1..M7 (same convention as PingPongSimBot).
     pub sign: [f64; 7],
     pub zero: [f64; 7],
@@ -67,6 +72,25 @@ impl Default for SafetyConfig {
             // The Ø150 mm paddle beyond the jaws; its direction in the gripper frame is not measured, so it is large.
             paddle_spheres: vec![([0.0, 0.17, 0.0], 0.11)],
             with_paddle: false,
+            // Gripper_Base_v1_1 frame (m): seat centre (0.2, 16.4, 58.9) mm + 5 mm out, spheres every 25 mm along the
+            // arm and down the leg, both sides; r 16 mm covers the 14 x 10 mm section between spheres.
+            boom_spheres: vec![
+                ([0.0251, 0.0215, 0.0611], 0.016),
+                ([0.0501, 0.0219, 0.0614], 0.016),
+                ([0.0751, 0.0223, 0.0616], 0.016),
+                ([0.1001, 0.0228, 0.0618], 0.016),
+                ([0.1001, 0.0288, 0.0481], 0.016),
+                ([0.1002, 0.0368, 0.0298], 0.016),
+                ([0.1002, 0.0437, 0.0142], 0.016),
+                ([-0.0249, 0.0206, 0.0606], 0.016),
+                ([-0.0499, 0.0201, 0.0604], 0.016),
+                ([-0.0749, 0.0197, 0.0601], 0.016),
+                ([-0.0999, 0.0193, 0.0599], 0.016),
+                ([-0.0998, 0.0253, 0.0461], 0.016),
+                ([-0.0998, 0.0333, 0.0278], 0.016),
+                ([-0.0998, 0.0402, 0.0123], 0.016),
+            ],
+            with_boom: false,
             // From the station viewer mapping, angle = lower + (tick - range_min)/(range_max - range_min)*(upper - lower),
             // with the URDF limits and the follower's calibrated ranges (5B14033257, PingPongSimBot tools/throw_sim.py),
             // checked against the real arm at level. Rewritten as sign/zero with the exact 4096 ticks/turn, matching
@@ -84,7 +108,10 @@ impl Default for SafetyConfig {
 impl SafetyConfig {
     /// The spheres in use: the gripper, plus the paddle when it is mounted.
     pub fn spheres(&self) -> impl Iterator<Item = &([f64; 3], f64)> {
-        self.tool_spheres.iter().chain(self.paddle_spheres.iter().filter(move |_| self.with_paddle))
+        self.tool_spheres
+            .iter()
+            .chain(self.paddle_spheres.iter().filter(move |_| self.with_paddle))
+            .chain(self.boom_spheres.iter().filter(move |_| self.with_boom))
     }
 
     pub fn tick_to_rad(&self, j: usize, tick: f64) -> f64 {
@@ -194,6 +221,20 @@ pub fn safe_amp(cfg: &SafetyConfig, base: &[u16; 7], j: usize, wanted: f64) -> f
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_boom_only_counts_when_mounted() {
+        // Gripper rolled 45 deg (M7 -512 ticks from level): the boom's leg swings down below the gripper.
+        let mut cfg = SafetyConfig { table_z_m: Some(0.0), ..Default::default() };
+        let rolled = [2003, 1002, 1942, 3185, 1864, 1892, 2226 - 512];
+        let without = lowest_z(&cfg, &cfg.angles(&rolled));
+        cfg.with_boom = true;
+        let with = lowest_z(&cfg, &cfg.angles(&rolled));
+        assert!(with < without - 0.005, "the boom must lower the lowest point: {with} vs {without}");
+        // At level it still clears the table margin.
+        let level = [2003, 1002, 1942, 3185, 1864, 1892, 2226];
+        assert!(lowest_z(&cfg, &cfg.angles(&level)) > 0.03);
+    }
 
     #[test]
     fn zero_pose_positions_are_the_summed_urdf_origins() {

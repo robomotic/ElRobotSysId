@@ -224,6 +224,27 @@ and voltage have short glitches (1–4 samples, e.g. 26 → 99 °C during motion
    reading in grams. Fit: `torque = Kt·η·N·i_motor + b ∓ friction` (up/down), written to
    `sysid_logs/<stamp>_stall_M<n>/stall.{csv,toml}`. Checked first: table clearance and range over the sweep; stops
    above 30 % duty or if the joint runs > 15 ticks past its goal (the lever slipped).
+   **The stall boom** (print it: [`hardware/stall_boom.stl`](hardware/stall_boom.stl), made by
+   `tools/make_stall_boom.py`):
+
+   ![Stall boom: plate with 4 slots, 100 mm arm, 55 mm leg with a rounded nub](docs/plots/stall-boom.png)
+
+   | | |
+   |---|---|
+   | Fits | the norma-core camera mount (`CameraMount_square_27mm`) **in place of the U20CAM**: unscrew the camera, screw the boom plate onto the same 4 holes (the STEP has them 33.8 mm apart; the slots fit 26–35 mm squares) |
+   | Plate | 44 × 44 × 4 mm, 4 diagonal slots 2.4 mm wide for M2 |
+   | Arm | 100 mm sideways along the jaws' closing axis, 14 mm (in the seat plane, the load direction) × 10 mm |
+   | Leg | 55 mm down the seat plane at the arm's end, rounded nub R 5 mm (the contact point) |
+   | Screws | 4 × M2 × 8 mm self-tapping (pan head), into the mount's 2.0 mm pilot holes; washers help on the slots |
+   | Print | PETG or PLA, plate flat on the bed, 100 % infill (or 6 walls), no supports; ~34 g |
+   | Load | ~10 N at the nub at the test's 17 % duty (~1 N·m at the root): wide margin |
+
+   Set-up for M7 (wrist roll): at the level pose the nub is ~139 mm above the table and ~99 mm horizontally from the
+   roll axis. Put the kitchen scale on a stack so the nub just touches its centre; tare is taken at offset 0 anyway.
+   Measure the lever (horizontal distance from the gripper's roll axis to the nub's contact point) with a ruler. On
+   the Pose screen, step M7 by 1–5 ticks to see which direction presses the nub down (with the arm on the +x side:
+   lower ticks, so `--into -1`). Run with `--payload boom` in the app so the safety model includes it (the stall test
+   always does): `elrobot-sysid --config ~/paddle-ws/paddle.toml --stall 7 --into -1 --lever-mm 99`.
 8. Validate by replaying logged goal sequences, from these runs and from PingPongSimBot runs, in sim and comparing positions.
 
 ## License

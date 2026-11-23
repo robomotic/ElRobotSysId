@@ -33,7 +33,7 @@ const TESTS: [(Test, &str, &str); 5] = [
 ];
 const AMPS: [u16; 6] = [25, 50, 75, 100, 150, 200];
 const ACCS: [u8; 5] = [0, 50, 100, 150, 254];
-const PAYLOADS: [&str; 3] = ["none", "paddle", "paddle+ball"];
+const PAYLOADS: [&str; 4] = ["none", "boom", "paddle", "paddle+ball"];
 const ARM_TIMEOUT: Duration = Duration::from_secs(30);
 const POSE_NAMES: [&str; 8] = ["base", "shoulder", "elbow", "forearm", "wrist roll", "wrist pitch", "wrist roll", "gripper"];
 const POSE_STEPS: [i32; 5] = [1, 5, 10, 25, 50];
@@ -813,7 +813,10 @@ impl App {
                         r.push(Line::from(" (the run checks it before moving)"));
                     }
                 }
-                r.push(Line::from(format!(" model: gripper{}", if sc.with_paddle { " + paddle" } else { " (no paddle)" })));
+                r.push(Line::from(format!(
+                    " model: gripper{}",
+                    if sc.with_paddle { " + paddle" } else if sc.with_boom { " + stall boom" } else { " (no paddle)" }
+                )));
             }
             None => {
                 r.push(Line::from(Span::styled(" table height NOT SET", Style::new().fg(Color::Red).bold())));

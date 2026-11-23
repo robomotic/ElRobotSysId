@@ -594,6 +594,7 @@ impl SessionOpts {
     pub fn safety(&self, sc: &SafetyConfig) -> SafetyConfig {
         let mut s = sc.clone();
         s.with_paddle = self.payload.contains("paddle");
+        s.with_boom = self.payload.contains("boom");
         s
     }
 

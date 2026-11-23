@@ -61,6 +61,11 @@ RUN/FREEZE/RETURN/LEAVE. A moving joint coasts ~1° (one 30 ms command delay) an
 - **Stall test (2026-11-23):** src/stall.rs + `--stall J --into ±1 --lever-mm L [--stall-max 40]` (line-based, types
   grams per level; tare at offset 0; fit torque = k·i + b ∓ f by 3-parameter least squares). Not run on the arm yet.
   SimIo duty slope set to the real 0.42 %/tick (was 2.5).
+- **Stall boom (2026-11-23, user asked for a printable lever):** hardware/stall_boom.stl from
+  tools/make_stall_boom.py (trimesh + manifold3d): screws onto the camera mount in place of the U20CAM (mount STEP holes
+  Ø2.0, 33.8 mm square, on the seat that faces forward/24° up; slots fit 26–35 mm). Arm 100 mm sideways, leg 55 mm down,
+  nub R5. At level: nub ~139 mm above the table, lever ~99 mm about M7, lower M7 ticks press down (+x side). Safety:
+  `boom_spheres` (both sides) with payload "boom"; the stall test always includes them. Not printed/run yet.
 - **Electrical/thermal model (issue #2):** meta.toml decodes the protection registers; `--sim` servos have a DC motor
   model (R 4.4 Ω, Ke·N 2.5 V·s/rad); `--sim --cli` runs headless; `tools/fit_electrical.py` fits
   `|duty·V_bus − Ke·N·ω| = R·|i|` (the ST3215 current is a magnitude: never negative on the arm) and the supply-current
