@@ -179,8 +179,13 @@ def fit_kp(log):
 def replay(session, joint, params, log=None):
     log = log or load_csv(session, joint)
     base = read_meta_base(session)
-    sim = ArmSim(params, base)
     j = joint - 1
+    # Initial condition from the data: the tested joint starts where the real one was (friction holds it a few ticks
+    # off its commanded base; starting at the base gave M3 a constant +3.9-tick bias), the servo's goal is the base.
+    start = list(base)
+    start[j] = int(round(log["position"][0]))
+    sim = ArmSim(params, start)
+    sim.s[j].goal = float(base[j])
     t_log, goal = log["t"], log["goal"]
     out = np.zeros(len(t_log))
     cur = np.zeros(len(t_log))

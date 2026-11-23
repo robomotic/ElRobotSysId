@@ -1,3 +1,5 @@
 /target
 /sysid_logs
 __pycache__/
+unity/**/bin/
+unity/**/obj/

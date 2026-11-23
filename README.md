@@ -12,6 +12,10 @@ about 1.7° of slop on M6. A simulator without those effects won't transfer in e
 **Download:** prebuilt Raspberry Pi 4/5 (aarch64) binaries are on the
 [Releases](https://github.com/robomotic/ElRobotSysId/releases) page (`elrobot-sysid-aarch64-linux` + `.sha256`). They need glibc ≥ 2.39 (Debian 13 / Raspberry Pi OS trixie, Ubuntu 24.04+)
 and no other libraries. Otherwise, build from source as below.
+**Model reference:** [docs/SERVO_MODEL.md](docs/SERVO_MODEL.md): the ST3215 registers, all equations (firmware loop,
+motor, friction, supply-current reading, protection, heating), the measured parameters, how the sysid works, how
+well the model matches the real arm, and its MuJoCo (Python) and Unity (C#, [`unity/`](unity)) implementations.
+
 ## What it does
 
 It excites **one joint at a time** around a base pose while all other joints hold (the gripper keeps its grip). It logs goal,
