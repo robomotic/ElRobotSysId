@@ -205,7 +205,19 @@ and voltage have short glitches (1–4 samples, e.g. 26 → 99 °C during motion
    (approached from both sides) and MuJoCo gravity torques: **Kt·η·N ≈ 1.6–1.8 N·m/A** and a gearbox **static friction
    of 0.25–0.41 N·m** (that is why holds read zero load: the gearbox carries the arm). Runs without a loaded standstill
    use R 4.1 Ω.
-6. Validate by replaying logged goal sequences, from these runs and from PingPongSimBot runs, in sim and comparing positions.
+6. **Servo step loop in MuJoCo** (`tools/servo_sim.py`, laptop, needs `mujoco`): every joint is an ST3215 with
+   transport delay (80 ms), a P loop on the tick error producing duty (dead zone, 50 % cap), the DC motor
+   (R, Ke·N, Kt·η·N → torque through `qfrc_applied`), gearbox stiction (`frictionloss` made stiff with noslip; MuJoCo's
+   default lets a held arm creep), the servo's own overload protection (25 % for 2 s → 20 %; 3.25 A) and a two-node
+   heating model (constants are placeholders until a thermal test). It reports what the servo would: position, load,
+   **supply** current, temperature. `replay <session> --joint N --fit` drives it with a logged run's goals and fits
+   dead zone and static friction: loaded M2/M3/M4 match to 4.2/4.5/2.9 ticks RMS, unloaded M7 to 4.9 (friction depends
+   on the load: ~0.3 N·m loaded, ~0.05 unloaded); M3's best friction (0.30 N·m) equals the hold estimate.
+   `tools/fit_torque.py <session>` gives Kt·η·N and static friction from the two-sided holds and MuJoCo gravity;
+   `tools/elrobot_model.py` is the shared URDF/tick mapping (contacts off: the URDF meshes overlap by up to 28 mm).
+
+   ![M3 replay at the loaded pose: goal, real and MuJoCo position; real and simulated supply current](docs/plots/replay-m3-loaded.png)
+7. Validate by replaying logged goal sequences, from these runs and from PingPongSimBot runs, in sim and comparing positions.
 
 ## License
 

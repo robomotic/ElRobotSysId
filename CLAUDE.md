@@ -52,6 +52,12 @@ RUN/FREEZE/RETURN/LEAVE. A moving joint coasts ~1° (one 30 ms command delay) an
   Reach it with the Pose screen `g` (`--target 2001,1750,2100,2450,1881,1869,2244`): straight path never below 51 mm,
   back to level ≥ 85 mm. Moving M2 alone first would hit the table (the Pose screen refuses it). Search scripts were
   in the session scratchpad (loadpose/search*.py), not in the repo.
+- **MuJoCo servo step loop (2026-11-23):** tools/servo_sim.py (+ elrobot_model.py, fit_torque.py, test_servo_sim.py;
+  run with ~/.pyenv/versions/antifake/bin/python3, mujoco 3.2.3; not on the Pi). Pitfalls found: URDF meshes overlap
+  (contacts off), MuJoCo frictionloss creeps under sustained load (dof_solref 0.002, solimp 0.99/0.999, noslip 10).
+  Replay fits: M2 4.2, M3 4.5, M4 2.9, M7 4.9 ticks RMS; kp_duty from the log (0.0042/tick M2–M4, 0.0021 M7).
+  Friction is load-dependent (0.3 loaded, 0.05 unloaded wrist): next model step. User (2026-11-23): printed parts make
+  the URDF masses uncertain → add a stall test against a kitchen scale (torque without masses).
 - **Electrical/thermal model (issue #2):** meta.toml decodes the protection registers; `--sim` servos have a DC motor
   model (R 4.4 Ω, Ke·N 2.5 V·s/rad); `--sim --cli` runs headless; `tools/fit_electrical.py` fits
   `|duty·V_bus − Ke·N·ω| = R·|i|` (the ST3215 current is a magnitude: never negative on the arm) and the supply-current
