@@ -6,14 +6,13 @@
 duty = Present Load / 1000, V_bus = voltage_dv / 10, omega = output speed in rad/s (4096 ticks per turn), i in A.
 s = +1 or -1: on the real follower the load is reported with the opposite sign to the speed (s = -1); the fit finds s.
 
-Two steps, because an unloaded joint draws almost no current while it moves (the drive voltage nearly cancels the
-back-EMF; 5-9 mA mean on the real arm):
-1. Start: V_m against omega on the samples where the joint moves (|omega| > 0.2 rad/s); gives s and a first Ke*N.
-   On an unloaded joint this is already the answer; first real values 2.5-3.1 V*s/rad (datasheet ~2.5).
-2. With enough current (>= 150 mA peak): |V_m - Ke*N*omega| = R*|i| (the ST3215 reports |i|), a 1-D search over Ke*N
-   with R by least squares. With less, Ke*N stays the motion-only value and R is not identifiable. Flagged unreliable below 150 mA peak; the MuJoCo line then uses the datasheet
-   R (4.4 ohm, 12 V / 2.7 A stall). Also tried for R: the servo reports the PWM-averaged supply current,
-   i_meas = |duty| * i.
+The ST3215 reports the SUPPLY current, i = |duty| * i_motor, as a magnitude (found 2026-11-23: at standstill under
+load R comes out 3.9-4.2 ohm this way, 25-36 ohm if read as motor current). So:
+1. R at standstill under load (no back-EMF): |V_m| = R * i / |duty|. Runs without a loaded standstill use 4.1 ohm.
+2. Ke*N with R fixed: |V_m - Ke*N*omega| = R * i / |duty| on moving samples, a 1-D search; the absolute values make the
+   unknown current sign (lifting vs lowering) irrelevant. Real arm: 1.6-2.0 V*s/rad on every joint, loaded or not.
+Torque per amp (Kt*eta*N ~ 1.6-1.8 N m/A) and the gearbox's static friction (0.25-0.41 N m) came from the two-sided
+holds of the loaded run with MuJoCo gravity torques (not in this script yet).
 
 Temperature and voltage readings have short glitches (1-4 samples, e.g. 26 -> 99 degC during motion); they are
 median-filtered (51 samples).
@@ -40,7 +39,7 @@ MIN_DUTY_B = 0.05  # model B divides by |duty|; skip samples below this
 CURRENT_LSB_A = 0.0065
 MIN_PEAK_A = 0.15  # below this the current has too few levels to fit R
 MIN_OMEGA = 0.2  # rad/s: 'moving' for the Ke*N fit
-R_DATASHEET = 4.4  # ohm: 12 V / 2.7 A stall (ST3215 12 V datasheet)
+R_DEFAULT = 4.1  # ohm: measured at standstill on M2-M4, 2026-11-23 (3.9-4.2; datasheet 12 V / 2.7 A = 4.4)
 MEDIAN_WINDOW = 51  # samples (~25 ms at 2 kHz); glitches last 1-4 samples and come in clusters
 
 
@@ -85,30 +84,21 @@ def median_filter(x, w=MEDIAN_WINDOW):
     return np.median(np.lib.stride_tricks.sliding_window_view(pad, w), axis=1)
 
 
-def fit_unsigned(v, omega, i_abs):
-    """|v - k*omega| = R*|i|: search k in [0, 10], R by least squares at each k. Returns (R, k, r2, rms)."""
-    den = i_abs @ i_abs
-
-    def at(k):
-        u = np.abs(v - k * omega)
-        r = (u @ i_abs) / den if den > 0 else float("nan")
-        res = u - r * i_abs
-        return res @ res, r, u
-    ks = np.linspace(0.0, 10.0, 1001)
-    k0 = ks[int(np.argmin([at(x)[0] for x in ks]))]
-    fine = np.linspace(k0 - 0.02, k0 + 0.02, 81)
-    k = fine[int(np.argmin([at(x)[0] for x in fine]))]
-    sse, r, u = at(k)
-    ss = ((u - u.mean()) ** 2).sum()
-    return r, k, (1.0 - sse / ss if ss > 0 else float("nan")), float(np.sqrt(sse / max(len(u) - 2, 1)))
+def fit_ke_n(v, omega, i_motor, r):
+    """|v - k*omega| = R*|i_motor| with R known: 1-D search over k in [0, 8] V*s/rad. The absolute values make the
+    unknown current sign (lifting vs lowering, motoring vs braking) irrelevant. Returns (k, rms)."""
+    ks = np.linspace(0.0, 8.0, 1601)
+    cost = [np.sum((np.abs(v - k * omega) - r * i_motor) ** 2) for k in ks]
+    k = ks[int(np.argmin(cost))]
+    return float(k), float(np.sqrt(min(cost) / max(len(v), 1)))
 
 
 def fit_joint(d):
     v_raw = d["duty"] * d["vbus"]
     omega, i = d["omega"], d["i"]
+    duty = np.abs(d["duty"])
     out = {"samples": int(len(v_raw))}
-    peak = float(i.max())
-    out["max_abs_current_a"] = peak
+    out["max_reported_current_a"] = float(i.max())
     out["temp_c"] = [float(d["temp"].min()), float(d["temp"].max())]
     out["temp_glitch_samples"] = int((np.abs(d["temp_raw"] - d["temp"]) >= 3).sum())
     out["v_bus"] = float(np.median(d["vbus"]))
@@ -116,50 +106,37 @@ def fit_joint(d):
     if hold.any():
         out["hold_current_a"] = float(np.mean(i[hold]))
         out["hold_duty"] = float(np.mean(d["duty"][hold]))
-    # 1. Start from motion alone: V = k*omega + c on moving samples; the sign of k is the load/speed convention.
+    # Sign convention: V against omega while moving (on the follower the load has the opposite sign to the speed).
     mv = np.abs(omega) > MIN_OMEGA
     out["moving_samples"] = int(mv.sum())
     if mv.sum() < 200:
         out["note"] = "too little motion to fit Ke*N (%d moving samples)" % mv.sum()
         return out
-    k, c = np.polyfit(omega[mv], v_raw[mv], 1)
-    sgn = 1.0 if k >= 0 else -1.0
+    k_motion, c = np.polyfit(omega[mv], v_raw[mv], 1)
+    sgn = 1.0 if k_motion >= 0 else -1.0
     v = sgn * v_raw
-    k = abs(k)
-    # 2. With enough current: |V - Ke*N*omega| = R*|i| (the ST3215 reports |i|), a 1-D search over Ke*N with R by
-    #    least squares (exact on the simulator). With too little current R only absorbs noise and drags Ke*N, so
-    #    Ke*N stays the motion-only value and R is not fitted.
-    m = mv | (np.abs(d["duty"]) >= MIN_DUTY_B)
-    out["current_levels"] = int(len(np.unique(np.round(i[m] / CURRENT_LSB_A))))
-    enough = peak >= MIN_PEAK_A
-    fits = {}
-    for name, ii in (("motor_current", i[m]), ("supply_current", i[m] / np.maximum(np.abs(d["duty"][m]), MIN_DUTY_B))):
-        if enough:
-            r, kk, r2, rms = fit_unsigned(v[m], omega[m], ii)
-        else:
-            kk = k
-            u = np.abs(v[m] - kk * omega[m])
-            r = float((u @ ii) / (ii @ ii)) if ii @ ii > 0 else float("nan")
-            e = u - r * ii
-            ss = ((u - u.mean()) ** 2).sum()
-            r2, rms = (float(1 - (e @ e) / ss) if ss > 0 else float("nan")), float(np.sqrt(np.mean(e ** 2)))
-        fits[name] = {"ke_n": float(kk), "r_ohm": float(r), "r2": float(r2), "rms_v": float(rms)}
-        out[name] = fits[name]
-    best = max(fits, key=lambda n: fits[n]["r2"])
-    out["ke_n"] = fits[best]["ke_n"]
-    out["ke_n_source"] = "joint fit with current" if enough else "motion only (current ~0)"
-    out["ke_n_corr"] = float(abs(np.corrcoef(omega[mv], v_raw[mv])[0, 1]))
-    out["ke_n_rms_v"] = float(np.sqrt(np.mean((v[mv] - k * omega[mv] - sgn * c) ** 2)))
-    out["offset_v"] = float(sgn * c)
     out["duty_sign"] = int(sgn)
-    out["no_load_speed_rad_s"] = out["v_bus"] / out["ke_n"]
-    out["preferred"] = best
-    r = out[out["preferred"]]["r_ohm"]
-    out["r_reliable"] = bool(peak >= MIN_PEAK_A and r > 0)
-    if not out["r_reliable"]:
-        out["note"] = ("R not identifiable: peak current %.0f mA (%d levels of 6.5 mA); needs load or acceleration. "
-                       "MuJoCo line uses the datasheet R %.1f ohm" % (peak * 1e3, out["current_levels"], R_DATASHEET))
-    out["r_ohm"] = r if out["r_reliable"] else R_DATASHEET
+    out["ke_n_corr"] = float(abs(np.corrcoef(omega[mv], v_raw[mv])[0, 1]))
+    # The ST3215 reports the SUPPLY current: i = |duty| * i_motor.
+    # 1. R at standstill under load: no back-EMF, |V| = R * i_motor.
+    st = (omega == 0) & (duty >= 0.10) & (i > 0)
+    out["standstill_samples"] = int(st.sum())
+    if st.sum() >= 2000:
+        rs = np.abs(v[st]) * duty[st] / i[st]
+        out["r_ohm"] = float(np.median(rs))
+        out["r_iqr"] = [float(x) for x in np.percentile(rs, [25, 75])]
+        out["r_source"] = "standstill under load"
+    else:
+        out["r_ohm"] = R_DEFAULT
+        out["r_source"] = "default (no loaded standstill in this run)"
+    # 2. Ke*N with R fixed, on moving samples with some duty (i_motor = i / |duty| needs |duty| > 0).
+    m = mv & (duty >= MIN_DUTY_B)
+    if m.sum() < 200:
+        out["note"] = "too few moving samples with duty >= %.2f to fit Ke*N" % MIN_DUTY_B
+        return out
+    out["ke_n"], out["ke_n_rms_v"] = fit_ke_n(v[m], omega[m], i[m] / duty[m], out["r_ohm"])
+    out["ke_n_samples"] = int(m.sum())
+    out["no_load_speed_rad_s"] = out["v_bus"] / out["ke_n"] if out["ke_n"] > 0 else float("nan")
     out["stall_current_a"] = out["v_bus"] / out["r_ohm"]
     return out
 
@@ -206,7 +183,7 @@ def main():
     csvs = sorted(a.session.glob("M*.csv"), key=lambda p: int(p.stem[1:]))
     if not csvs:
         sys.exit("no M<n>.csv in %s" % a.session)
-    print("%-4s %7s %6s %7s %5s %8s %7s %7s %8s" % ("", "Ke*N", "corr", "moving", "sign", "R ohm", "R?", "peak A", "temp C"))
+    print("%-4s %7s %6s %7s %5s %7s  %-28s %8s" % ("", "Ke*N", "corr", "samples", "sign", "R ohm", "R from", "temp C"))
     for p in csvs:
         jid = int(p.stem[1:])
         f = fit_joint(read_csv(p))
@@ -218,18 +195,13 @@ def main():
             lines.append("")
             continue
         temp = "%.0f-%.0f" % tuple(f["temp_c"])
-        rstr = "%.2f" % f[f["preferred"]]["r_ohm"] if f["r_reliable"] else "–"
-        print("M%-3d %7.3f %6.3f %7d %+5d %8s %7s %7.3f %8s" % (
-            jid, f["ke_n"], f["ke_n_corr"], f["moving_samples"], f["duty_sign"], rstr,
-            "ok" if f["r_reliable"] else "NO", f["max_abs_current_a"], temp))
-        for k in ("ke_n", "ke_n_source", "ke_n_corr", "ke_n_rms_v", "offset_v", "duty_sign", "moving_samples", "no_load_speed_rad_s",
-                  "r_ohm", "r_reliable", "preferred", "v_bus", "stall_current_a", "hold_current_a", "hold_duty",
-                  "max_abs_current_a", "current_levels", "temp_c", "temp_glitch_samples", "samples"):
+        print("M%-3d %7.3f %6.3f %7d %+5d %7.2f  %-28s %8s" % (
+            jid, f["ke_n"], f["ke_n_corr"], f["ke_n_samples"], f["duty_sign"], f["r_ohm"], f["r_source"][:28], temp))
+        for k in ("ke_n", "ke_n_rms_v", "ke_n_samples", "ke_n_corr", "duty_sign", "moving_samples", "no_load_speed_rad_s",
+                  "r_ohm", "r_iqr", "r_source", "standstill_samples", "v_bus", "stall_current_a", "hold_current_a", "hold_duty",
+                  "max_reported_current_a", "temp_c", "temp_glitch_samples", "samples"):
             if k in f:
-                val = f[k]
-                lines.append("%s = %s" % (k, ("true" if val else "false") if isinstance(val, bool) else toml_value(val)))
-        for model in ("motor_current", "supply_current"):
-            lines.append("r_fit_%s = { %s }" % (model, ", ".join("%s = %s" % (k, toml_value(v)) for k, v in f[model].items())))
+                lines.append("%s = %s" % (k, toml_value(f[k])))
         prot = protection(meta.get(jid, {}))
         if prot:
             lines.append("protection = { %s }" % ", ".join("%s = %s" % (k, toml_value(v)) for k, v in prot.items()))
@@ -237,11 +209,9 @@ def main():
         gain = a.eta * f["ke_n"] / f["r_ohm"]
         damp = a.eta * f["ke_n"] ** 2 / f["r_ohm"]
         lines.append('mjcf = \'<general joint="M%d" ctrlrange="%.1f %.1f" gaintype="fixed" gainprm="%.4g" '
-                     'biastype="affine" biasprm="0 0 %.4g"/>\'  # eta %.2f, Kt = Ke assumed, R %s'
-                     % (jid, -f["v_bus"], f["v_bus"], gain, -damp, a.eta, "fitted" if f["r_reliable"] else "datasheet"))
+                     'biastype="affine" biasprm="0 0 %.4g"/>\'  # eta %.2f, Kt = Ke assumed'
+                     % (jid, -f["v_bus"], f["v_bus"], gain, -damp, a.eta))
         lines.append("")
-        if "note" in f:
-            print("     " + f["note"])
     out = a.out or a.session / "electrical.toml"
     out.write_text("\n".join(lines))
     print("written %s" % out)

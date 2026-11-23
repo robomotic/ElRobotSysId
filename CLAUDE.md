@@ -41,6 +41,12 @@ RUN/FREEZE/RETURN/LEAVE. A moving joint coasts ~1° (one 30 ms command delay) an
   t63 171 ms, slop 4.8; |load| ≤ 17.6 %, current ≤ 46 mA (mean 6 mA while moving). **Ke·N from duty·V_bus vs speed:**
   M7 2.54/2.53 (two runs), M2 2.95, M3 2.80, M5 3.08, M6 2.93 V·s/rad (corr ~0.95); load sign is opposite to speed.
   R still unidentified (needs ≥ 150 mA): fitter falls back to the datasheet 4.4 Ω.
+- **Fourth run (2026-11-23): M2–M4 ±50 at the load pose** (`sysid_logs/1795395590_none`, base 2000 1753 2103 2482).
+  **The reported current is the SUPPLY current, |duty|·i_motor**: standstill R = 4.17/4.04/4.17 Ω (median; IQR ~3.8–4.4).
+  With R fixed, Ke·N 1.6–2.0 V·s/rad on all runs (the earlier 2.5–3.1 "motion only" values were biased: the motor
+  current is ~10× the reported one). Two-sided holds + MuJoCo gravity: Kt·η·N 1.69/1.62/1.84 N·m/A, static friction
+  0.25/0.30/0.41 N·m (M2/M3/M4). Open: these imply ~5 N·m at 12 V vs the datasheet's 2.94 (URDF masses? datasheet?).
+  SimIo reports supply current too. The Kt script was ad hoc (scratchpad loadpose/kt.py), not in the repo yet.
 - **Load pose for R (2026-11-23, MuJoCo search on the norma-core URDF, arm 0.62 kg):** M2 1750, M3 2100, M4 2450
   (others as now): arm half upright, gripper forward ~200 mm, 91 mm above the table; gravity M2/M3/M4 0.31/0.48/0.42 N m.
   Reach it with the Pose screen `g` (`--target 2001,1750,2100,2450,1881,1869,2244`): straight path never below 51 mm,

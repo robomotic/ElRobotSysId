@@ -145,8 +145,9 @@ impl SimIo {
             load: load as i16,
             voltage_dv: (self.v_bus * 10.0).round() as u8,
             temperature_c: 30,
-            // Like the real ST3215: magnitude only (never negative), 6.5 mA resolution.
-            current_ma: (amps.abs() * 1000.0 / 6.5).round() * 6.5,
+            // Like the real ST3215: the SUPPLY current |duty|*|i_motor| (R 3.9-4.1 ohm fits only this way on the arm,
+            // 2026-11-23), magnitude only, 6.5 mA resolution.
+            current_ma: ((load / 1000.0).abs() * amps.abs() * 1000.0 / 6.5).round() * 6.5,
         }
     }
 }
@@ -247,8 +248,11 @@ mod tests {
                 let st = io.read_state(2).await.unwrap();
                 let omega = st.speed as f64 * std::f64::consts::TAU / TICKS_PER_REV;
                 let v = st.load as f64 / 1000.0 * st.voltage_dv as f64 / 10.0;
-                let resid = (v - io.ke_n * omega).abs() - io.r_ohm * st.current_ma / 1000.0;
-                assert!(resid.abs() < 0.02, "|V - Ke·N·ω| = R·|i| within the current resolution: {resid}");
+                let duty = (st.load as f64 / 1000.0).abs();
+                if duty > 0.05 {
+                    let resid = (v - io.ke_n * omega).abs() - io.r_ohm * st.current_ma / 1000.0 / duty;
+                    assert!(resid.abs() < 0.6, "|V - Ke·N·ω| = R·i_supply/|duty| within the resolution: {resid}");
+                }
                 assert!(st.current_ma >= 0.0, "the ST3215 reports the current magnitude only");
                 moving |= st.speed != 0 && st.current_ma > 0.0;
             }
