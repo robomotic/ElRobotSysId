@@ -1,6 +1,6 @@
 [package]
 name = "elrobot-sysid"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 description = "Per-joint ST3215 servo system identification for the ElRobot follower (MuJoCo sim2real2sim)"
 license = "Apache-2.0"
