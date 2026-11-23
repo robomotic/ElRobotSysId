@@ -197,9 +197,12 @@ and voltage have short glitches (1–4 samples, e.g. 26 → 99 °C during motion
    `duty·V_bus = R·i + Ke·N·ω`, as a MuJoCo `general` actuator with `ctrl` = motor voltage, so the simulation gives each
    joint's current and voltage; then the servo's overload protection and a two-node heating model on top.
    `tools/fit_electrical.py <session>` fits R and Ke·N per joint and writes `<session>/electrical.toml` (with the protection
-   settings and an MJCF actuator line). The current has no sign, so it fits `|duty·V_bus − Ke·N·ω| = R·|i|`. On simulated
-   servos it recovers the simulator's R 4.4 Ω and Ke·N 2.5 V·s/rad. It needs current: the unloaded wrist draws < 60 mA
-   (< 10 steps of 6.5 mA) and is flagged as unreliable; the loaded joints M2–M4 are needed.
+   settings and an MJCF actuator line). An unloaded joint draws almost no current while it moves (the drive voltage
+   cancels the back-EMF), so **Ke·N comes from duty·V_bus against speed alone**: 2.5–3.1 V·s/rad on the real arm
+   (M7 2.53 and 2.54 in two runs; datasheet ≈ 2.5). The servo reports the load with the opposite sign to the speed; the
+   fit finds the sign. **R needs current** (≥ 150 mA: load or acceleration); until then the MJCF line uses the datasheet
+   R 4.4 Ω. The current has no sign, so with enough current it fits `|duty·V_bus − Ke·N·ω| = R·|i|`. On simulated servos
+   it recovers the simulator's R 4.4 Ω and Ke·N 2.5 V·s/rad. Holds read zero load: the gearbox holds the arm by friction.
 6. Validate by replaying logged goal sequences, from these runs and from PingPongSimBot runs, in sim and comparing positions.
 
 ## License

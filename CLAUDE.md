@@ -37,6 +37,10 @@ RUN/FREEZE/RETURN/LEAVE. A moving joint coasts ~1° (one 30 ms command delay) an
   so ±25-tick tests reach only ~12 % duty and < 75 mA: too little for the electrical fit; it needs steps of ~100+ ticks
   (e.g. on a wrist roll joint, where the sweep stays clear). The app stalled 26/77/97 s (UI and run shared one thread; a
   blocked SSH terminal stops both): fixed, runs and the Pose task now have their own thread (stall test: 9.5 s gap → 4 ms).
+- **Third real run (2026-11-23): M7 alone, amplitude 150** (steps to ±100, `sysid_logs/1795366217_none`): dead 78 ms,
+  t63 171 ms, slop 4.8; |load| ≤ 17.6 %, current ≤ 46 mA (mean 6 mA while moving). **Ke·N from duty·V_bus vs speed:**
+  M7 2.54/2.53 (two runs), M2 2.95, M3 2.80, M5 3.08, M6 2.93 V·s/rad (corr ~0.95); load sign is opposite to speed.
+  R still unidentified (needs ≥ 150 mA): fitter falls back to the datasheet 4.4 Ω.
 - **Electrical/thermal model (issue #2):** meta.toml decodes the protection registers; `--sim` servos have a DC motor
   model (R 4.4 Ω, Ke·N 2.5 V·s/rad); `--sim --cli` runs headless; `tools/fit_electrical.py` fits
   `|duty·V_bus − Ke·N·ω| = R·|i|` (the ST3215 current is a magnitude: never negative on the arm) and the supply-current
