@@ -104,8 +104,8 @@ struct Cli {
     /// Stall test: lever length from the joint axis to where it touches the scale, mm.
     #[arg(long)]
     lever_mm: Option<f64>,
-    /// Stall test: largest offset into the scale, ticks (duty ≈ 0.42 %/tick: 40 → ~17 %).
-    #[arg(long, default_value_t = 40)]
+    /// Stall test: largest offset into the scale, ticks (duty ≈ 0.42 %/tick: 20 → ~8 %, ≤ ~0.4 N m).
+    #[arg(long, default_value_t = 20)]
     stall_max: i32,
 }
 
@@ -176,10 +176,9 @@ async fn main() -> Result<()> {
     }
 
     if let Some(joint) = cli.stall {
-        // The stall test always models the boom (on either side): conservative if it is the fingertips instead.
-        let mut sc_stall = sc_run.clone();
-        sc_stall.with_boom = true;
-        return run_stall(&cli, &cfg, &sc_stall, joint).await;
+        // Recommended set-up: the closed gripper's fingertips pressed onto the scale by M6 (no printed part); the boom
+        // counts only with --payload boom (not recommended on the camera mount: see README).
+        return run_stall(&cli, &cfg, &sc_run, joint).await;
     }
 
     if cli.sim && !cli.dry_run {

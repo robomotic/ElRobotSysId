@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Printable boom for the stall test (issue #2): screws onto the gripper's camera mount in place of the U20CAM.
 
+WARNING (2026-11-23, user: "the camera base is quite fragile"): do NOT use it on the camera mount. The whole joint
+torque (up to ~0.85 N m) would pass through the mount's thin post, snap fit and M2 self-tapping screws, which carry a
+14 g camera (~0.01 N m). Use the fingertips on M6 instead (README, stall test). Kept as a geometry reference.
+
 Geometry (plate frame: x = sideways along the gripper's jaw-closing axis, y = in the seat plane "up", z = out of the
 seat; the seat faces forward and 24 deg up, so the camera looks forward/down):
 - plate 44 x 44 x 4 mm with 4 diagonal slots for M2 screws (2.4 mm wide): fits square hole patterns of 26-35 mm.
