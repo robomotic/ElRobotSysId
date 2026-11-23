@@ -155,11 +155,13 @@ $B --dry-run --base level           # per joint: lowest clearance over the plann
   at least `margin_m` (30 mm) above the table, or the run is refused with the largest safe amplitude per joint.
 - While running: the measured pose is checked every sample; below the margin the joint stops and returns to base.
 
-**Status (2026-11-20): the geometry is not verified on the real arm yet.** With the assumed tick→angle convention
-(`sign = -1`, `zero = 2048` for every joint) the model puts the tool *below* the base at the level pose, which can't be
-right, so the check refuses everything (it fails safe). Before the first run: compare `--show-clearance` with a ruler,
-and fix the per-joint `sign`/`zero` in `sysid_safety.toml`. The reference is the station web viewer's mapping, which
-spreads each motor's calibrated tick range over the URDF joint limits.
+**Calibrated (2026-11-21..23): [`sysid_safety.toml`](sysid_safety.toml) in the repo is the checked configuration**
+for the follower it was measured on: tick→angle `sign = +1` and `zero` from the station viewer's mapping (each motor's
+calibrated range spread over the URDF joint limits, matched at level), the calibrated ranges, the table at 0 mm (base
+clamped onto the table), the tool, camera, paddle and boom spheres. It was checked with the viewer, `--show-clearance`
+and a ruler. On another arm the geometry carries over, but **check your own table height** (`--set-table-z-mm`) and
+**your calibrated ranges/zeros** (station viewer, then `--show-clearance` and a ruler) before anything moves. Every field
+is explained in the file.
 
 ## Output
 

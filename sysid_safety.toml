@@ -1,0 +1,46 @@
+# Table safety area for elrobot-sysid (issue #1), calibrated on the ElRobot follower 5B14033257 (2026-11-21..23).
+# The app reads this from the folder it runs in (--safety to choose another file).
+#
+# Other arms: the geometry (tool spheres, boom) is the same for every ElRobot, but CHECK these before moving yours:
+# - table_z_m: your table height in the base frame. 0.0 = the base is clamped straight onto the table (the base mesh
+#   starts at z = 0); measure and set yours with `elrobot-sysid --set-table-z-mm <mm>` (rewrites this file without
+#   the comments).
+# - zero / range_min / range_max: from this follower's station calibration (viewer mapping). Another arm has other
+#   calibrated ranges: read them in the station viewer and check the model with `--show-clearance` and a ruler.
+
+# Height of the table plane in the robot base frame (m) and the clearance every modelled point keeps above it.
+table_z_m = 0.0
+margin_m = 0.03
+
+# Spheres ([x, y, z] centre in the Gripper_Base_v1_1 frame, m; radius m): gripper motor, jaws, and the wrist camera
+# (U20CAM on top of the gripper, sphere fitted to RoboSim's CAD-registered collision boxes).
+tool_spheres = [
+    [[0.0, 0.045, 0.0], 0.04],
+    [[0.0, 0.10, 0.0], 0.05],
+    [[0.0014, 0.0215, 0.0485], 0.042],
+]
+
+# Added only with payload "paddle" / "paddle+ball" (PingPongSimBot's 150 mm paddle in the jaws).
+paddle_spheres = [[[0.0, 0.17, 0.0], 0.11]]
+
+# Added with payload "boom" and by `--stall 8`: the stall-test boom on the M8 horn (hardware/stall_boom_m8.stl),
+# arm 100 mm sideways at 20-28 mm in front of the horn, either side.
+boom_spheres = [
+    [[0.025, 0.069, -0.002], 0.016],
+    [[0.050, 0.069, -0.002], 0.016],
+    [[0.075, 0.069, -0.002], 0.016],
+    [[0.100, 0.069, -0.002], 0.016],
+    [[-0.025, 0.069, -0.002], 0.016],
+    [[-0.050, 0.069, -0.002], 0.016],
+    [[-0.075, 0.069, -0.002], 0.016],
+    [[-0.100, 0.069, -0.002], 0.016],
+]
+
+# Joint angle (rad) = sign * (tick - zero) * 2 pi / 4096 for M1..M7: the station viewer's mapping (URDF limits over the
+# calibrated range), matched at the level pose; checked against the real arm with the viewer and a ruler.
+sign = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+zero = [2050.3, 2053.0, 2051.3, 2053.0, 1842.7, 1924.5, 2198.6]
+
+# Calibrated range of M1..M8 in ticks (station calibration). Runs and the Pose screen stay inside it, ± 5 ticks.
+range_min = [1087, 1004, 935, 900, 141, 1040, 134, 1237]
+range_max = [3009, 3092, 3161, 3196, 3955, 3056, 3962, 2859]

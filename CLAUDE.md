@@ -101,7 +101,7 @@ PingPongSimBot tools/throw_sim.py), matched at level; the viewer matches the rea
 on the table; the base mesh starts at z = 0; the table edge runs along the base, the model's infinite plane is
 conservative). Camera sphere from RoboSim's CAD-registered U20CAM boxes (on top of the gripper, +z of Gripper_Base_v1_1).
 Ruler: gripper motor centre ~114 mm vs model 108; lowest gripper point ~80 mm vs spheres 56 mm. Same values are the code
-defaults and in `~/ElRobotSysId/sysid_safety.toml` on the Pi (with table_z_m = 0). Sign check confirmed by the user
+defaults and in the repo's commented `sysid_safety.toml` (committed 2026-11-23 for other users; table_z_m = 0). Sign check confirmed by the user
 (2026-11-22): the viewer arm turns the same way as the real one for M2–M4. Next: M2–M4 run at `--max-amp 30` (dry-run
 first), when the user is back.
 
