@@ -28,8 +28,8 @@ transfer.
 
 Prebuilt Raspberry Pi 4/5 (aarch64) binaries: [Releases](https://github.com/robomotic/ElRobotSysId/releases)
 (`elrobot-sysid-aarch64-linux` + `.sha256`; glibc ≥ 2.39, e.g. Debian 13 / Raspberry Pi OS trixie, Ubuntu 24.04+).
-The latest release (v0.2.1, 2026-11-20) predates the calibrated safety model, the Pose screen and the stall test:
-build from source for those.
+The latest release is **v0.3.0** (2026-11-23): calibrated safety, Pose screen, stall test. Run it from a folder that
+has `sysid_safety.toml`.
 
 ## What the tool does
 

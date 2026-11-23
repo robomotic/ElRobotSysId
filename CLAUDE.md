@@ -38,7 +38,6 @@ System identification of the ElRobot follower's ST3215 servos (RoboSim #69, sim2
   the pendulum: don't write the bench mode until they say so.** Upstream BAM's STS3215 profile is 7.4 V/1:345 with a
   5 ms command delay: our "dead time" is probably mostly stiction + target rate limiting.
 - The withdrawn camera-mount boom: the camera base is fragile (user); never load it.
-- Prebuilt release v0.2.1 predates the calibration, Pose screen, stall test and thread fix.
 
 ## Safety facts (issue #1, closed; all enforced in src/safety.rs, jog.rs, session.rs)
 - Tick → angle: sign +1, zeros 2050.3 2053.0 2051.3 2053.0 1842.7 1924.5 2198.6 (station viewer mapping, checked with
@@ -86,6 +85,7 @@ System identification of the ElRobot follower's ST3215 servos (RoboSim #69, sim2
 ## Releases
 Built on the Pi, stripped, `.sha256` attached (asset `elrobot-sysid-aarch64-linux`), tag at the built commit; needs
 glibc ≥ 2.39. v0.1.0 (`3036410`, line-based CLI + table safety), v0.2.0 (`effa4e0`, full-screen app, `--sim`),
-v0.2.1 (`5a35680`, SAFETY STOP, camera in the safety model). To repeat: `bash ~/pp-build.sh` on the Pi, `strip` a
+v0.2.1 (`5a35680`, SAFETY STOP, camera in the safety model), v0.3.0 (2026-11-23, `cbfd008`, latest: calibrated safety,
+Pose screen, stall test, duty-cap blocked stop, run thread fix; notes summarise the servo findings). To repeat: `bash ~/pp-build.sh` on the Pi, `strip` a
 copy, `sha256sum`, scp it down, `gh release create vX.Y.Z --target <full sha> --notes-file … <bin> <bin>.sha256`;
 check the minimum glibc with `objdump -T <bin> | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1`.
